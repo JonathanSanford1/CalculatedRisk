@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "854556320532",
+    "project_id": "calculatedrisk-d1d3f",
+    "storage_bucket": "calculatedrisk-d1d3f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:854556320532:android:dc45d4c678d4e662e89801",
+        "android_client_info": {
+          "package_name": "com.jonathansanford.calculated_risk"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBQd64iGp-yjrIHB6XQMl4i2CWq19zFB8g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:854556320532:android:f52b9c4c2bc94faae89801",
+        "android_client_info": {
+          "package_name": "com.yourname.calculated_risk"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBQd64iGp-yjrIHB6XQMl4i2CWq19zFB8g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
