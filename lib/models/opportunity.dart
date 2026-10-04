@@ -1,6 +1,7 @@
 import '../utils/format.dart';
 import 'firestore_dates.dart';
 import 'profit_boost.dart';
+import 'rounding.dart';
 
 /// One of the two bets in a hedge.
 class OpportunityLeg {
@@ -136,26 +137,66 @@ class GroupBoost {
       );
 }
 
+/// One boost combination's hedges under one rounding mode.
+class ModeResult {
+  const ModeResult({
+    required this.bestProfit,
+    required this.betCount,
+    required this.bets,
+  });
+
+  final double bestProfit;
+  final int betCount; // total found (bets holds up to the top 25)
+  final List<Opportunity> bets;
+
+  static const empty = ModeResult(bestProfit: 0, betCount: 0, bets: []);
+
+  factory ModeResult.fromMap(Map<String, dynamic> data) => ModeResult(
+        bestProfit: (data['bestProfit'] as num? ?? 0).toDouble(),
+        betCount: (data['betCount'] as num? ?? 0).toInt(),
+        bets: [
+          for (final item in (data['bets'] as List? ?? const []))
+            Opportunity.fromMap(Map<String, dynamic>.from(item as Map)),
+        ],
+      );
+}
+
 /// One boost combination (a single boost, or a DraftKings + FanDuel pair)
-/// and its best hedges, most profitable first.
+/// and its best hedges, most profitable first. The Cloud Function stores
+/// results for every rounding mode; [withMode] picks one to show.
 class HedgeGroup {
   const HedgeGroup({
     required this.id,
     required this.isTwoWay,
     required this.boosts,
-    required this.bestProfit,
-    required this.betCount,
-    required this.bets,
     required this.usedBoostIds,
+    required this.mode,
+    required this.results,
   });
 
   final String id;
   final bool isTwoWay; // both sides boosted
   final List<GroupBoost> boosts;
-  final double bestProfit;
-  final int betCount; // total found (bets holds up to the top 25)
-  final List<Opportunity> bets;
   final List<String> usedBoostIds; // boosts on this card marked used
+
+  /// The rounding mode whose bets this object shows.
+  final RoundingMode mode;
+  final Map<RoundingMode, ModeResult> results;
+
+  ModeResult get _current => results[mode] ?? ModeResult.empty;
+  double get bestProfit => _current.bestProfit;
+  int get betCount => _current.betCount;
+  List<Opportunity> get bets => _current.bets;
+
+  /// The same boost combination, showing bets for [newMode].
+  HedgeGroup withMode(RoundingMode newMode) => HedgeGroup(
+        id: id,
+        isTwoWay: isTwoWay,
+        boosts: boosts,
+        usedBoostIds: usedBoostIds,
+        mode: newMode,
+        results: results,
+      );
 
   /// True when any boost on this card has been marked used.
   bool get usesUsedBoost => usedBoostIds.isNotEmpty;
@@ -173,21 +214,29 @@ class HedgeGroup {
       ].join(' ').toLowerCase();
 
   factory HedgeGroup.fromFirestore(String id, Map<String, dynamic> data) {
-    List<Map<String, dynamic>> maps(Object? raw) => [
-          for (final item in (raw as List? ?? const []))
-            Map<String, dynamic>.from(item as Map),
-        ];
+    final results = <RoundingMode, ModeResult>{};
+    final rawModes = data['modes'];
+    if (rawModes is Map) {
+      for (final entry in rawModes.entries) {
+        results[RoundingMode.fromName(entry.key)] = ModeResult.fromMap(
+            Map<String, dynamic>.from(entry.value as Map));
+      }
+    } else {
+      // Saved before rounding modes existed: top-level is "no rounding".
+      results[RoundingMode.none] = ModeResult.fromMap(data);
+    }
     return HedgeGroup(
       id: id,
       isTwoWay: data['type'] == 'two_way',
-      boosts: maps(data['boosts']).map(GroupBoost.fromMap).toList(),
-      bestProfit: (data['bestProfit'] as num? ?? 0).toDouble(),
-      betCount: (data['betCount'] as num? ?? 0).toInt(),
-      bets: maps(data['bets']).map(Opportunity.fromMap).toList(),
-      usedBoostIds: [
-        for (final id in (data['usedBoostIds'] as List? ?? const []))
-          id as String,
+      boosts: [
+        for (final b in (data['boosts'] as List? ?? const []))
+          GroupBoost.fromMap(Map<String, dynamic>.from(b as Map)),
       ],
+      usedBoostIds: [
+        for (final i in (data['usedBoostIds'] as List? ?? const [])) i as String,
+      ],
+      mode: RoundingMode.none,
+      results: results,
     );
   }
 }
@@ -199,12 +248,25 @@ class RefreshStatus {
     required this.ok,
     required this.message,
     required this.requestsRemaining,
+    required this.quotaRemaining,
+    required this.quotaUsed,
   });
 
   final DateTime? lastRunAt;
   final bool ok;
   final String message;
-  final String? requestsRemaining; // The Odds API quota left
+  final String? requestsRemaining; // The Odds API quota left (as text)
+
+  /// The Odds API credits left and used this month (null until the first
+  /// odds check after this update).
+  final int? quotaRemaining;
+  final int? quotaUsed;
+
+  /// The monthly plan size, worked out from used + remaining (500 on the
+  /// free plan), so the bar stays correct if the plan changes.
+  int? get quotaTotal => quotaRemaining == null
+      ? null
+      : quotaRemaining! + (quotaUsed ?? 0);
 
   factory RefreshStatus.fromMap(Map<String, dynamic> data) => RefreshStatus(
         lastRunAt:
@@ -212,5 +274,7 @@ class RefreshStatus {
         ok: data['ok'] as bool? ?? true,
         message: data['message'] as String? ?? '',
         requestsRemaining: data['requestsRemaining']?.toString(),
+        quotaRemaining: (data['quotaRemaining'] as num?)?.toInt(),
+        quotaUsed: (data['quotaUsed'] as num?)?.toInt(),
       );
 }

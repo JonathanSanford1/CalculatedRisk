@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../services/boost_repository.dart';
 import '../widgets/error_view.dart';
 import 'main_shell.dart';
+import '../widgets/brand_app_bar.dart';
 
 /// Signs in (anonymously, once per install), then shows the app.
 class HomeScreen extends StatefulWidget {
@@ -37,7 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
           return MainShell(repository: snapshot.data!);
         }
         return Scaffold(
-          appBar: AppBar(title: const Text('CalculatedRisk')),
+          appBar: const BrandAppBar(),
           body: snapshot.hasError
               ? ErrorView(
                   message: 'Couldn\'t connect to your account.',

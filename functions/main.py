@@ -11,8 +11,11 @@ Firestore layout
                                        its best hedges)
   users/{uid}/meta/status              written here, read by the app
   users/{uid}/meta/plan                written here: the best way to use the boosts
+                                       (for each rounding mode)
+  users/{uid}/settings/preferences     written by the app: selected rounding mode
   odds_cache/{sportKey}                written and read here only
   odds_cache/_sports                   the API's league list, cached
+  odds_cache/_quota                    credits used/remaining this month
 
 Functions
   scheduled_refresh       every 2 hours, for every user with boosts
@@ -23,6 +26,7 @@ Functions
 
 import hashlib
 import math
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -30,6 +34,7 @@ from typing import Any
 import requests
 from firebase_admin import firestore, initialize_app
 from firebase_functions import firestore_fn, https_fn, options, scheduler_fn
+from firebase_functions.params import SecretParam
 
 initialize_app()
 options.set_global_options(max_instances=10)
@@ -38,7 +43,11 @@ options.set_global_options(max_instances=10)
 # Configuration
 # --------------------------------------------------------------------------
 
-ODDS_API_KEY = "5dd8a236308205f8cf22f966bee1f42d"
+# The Odds API key lives in Google Cloud Secret Manager, not in this file.
+# Set it with:  firebase functions:secrets:set ODDS_API_KEY
+# Every function that can call the API lists it in secrets=[...] below, and
+# the key is read with ODDS_API_KEY.value only while a function is running.
+ODDS_API_KEY = SecretParam("ODDS_API_KEY")
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/{sport}/odds"
 SPORTS_LIST_URL = "https://api.the-odds-api.com/v4/sports"
 BOOKMAKERS = ("draftkings", "fanduel")
@@ -267,6 +276,25 @@ def parse_boost(doc_id: str, data: dict[str, Any]) -> Boost | None:
 # --------------------------------------------------------------------------
 
 
+def _record_quota(headers: Any) -> None:
+    """Save the credits The Odds API reports in every response's headers, so
+    the app can show how much of the monthly quota is left."""
+    remaining = headers.get("x-requests-remaining")
+    if remaining is None:
+        return
+    try:
+        data: dict[str, Any] = {
+            "remaining": int(float(remaining)),
+            "updatedAt": datetime.now(timezone.utc),
+        }
+        used = headers.get("x-requests-used")
+        if used is not None:
+            data["used"] = int(float(used))
+    except (TypeError, ValueError):
+        return
+    db().collection("odds_cache").document("_quota").set(data)
+
+
 def load_active_sport_keys(memo: dict[str, Any]) -> set[str]:
     """Sport keys The Odds API currently has games for, excluding
     futures/outright markets. This call doesn't count against the quota."""
@@ -285,9 +313,10 @@ def load_active_sport_keys(memo: dict[str, Any]) -> set[str]:
             return memo["_sports"]
 
     try:
-        response = requests.get(SPORTS_LIST_URL, params={"apiKey": ODDS_API_KEY}, timeout=20)
+        response = requests.get(SPORTS_LIST_URL, params={"apiKey": ODDS_API_KEY.value}, timeout=20)
     except requests.RequestException as error:
         raise OddsApiError(f"Couldn't reach The Odds API: {error}") from error
+    _record_quota(response.headers)
     if response.status_code != 200:
         raise OddsApiError(
             f"The Odds API returned {response.status_code} for the league list: "
@@ -352,7 +381,7 @@ def fetch_odds(sport_key: str) -> tuple[list[dict[str, Any]], str | None]:
         response = requests.get(
             ODDS_API_URL.format(sport=sport_key),
             params={
-                "apiKey": ODDS_API_KEY,
+                "apiKey": ODDS_API_KEY.value,
                 "markets": MARKETS,
                 "oddsFormat": "american",
                 "bookmakers": ",".join(BOOKMAKERS),
@@ -362,6 +391,7 @@ def fetch_odds(sport_key: str) -> tuple[list[dict[str, Any]], str | None]:
     except requests.RequestException as error:
         raise OddsApiError(f"Couldn't reach The Odds API: {error}") from error
 
+    _record_quota(response.headers)
     if response.status_code != 200:
         raise OddsApiError(
             f"The Odds API returned {response.status_code} for {sport_key}: "
@@ -374,9 +404,11 @@ def fetch_odds(sport_key: str) -> tuple[list[dict[str, Any]], str | None]:
 
 
 def load_games(
-    sport_key: str, memo: dict[str, Any]
+    sport_key: str, memo: dict[str, Any], allow_fetch: bool = True
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Games for a league: from this run's memo, else Firestore cache, else the API."""
+    """Games for a league: from this run's memo, else Firestore cache, else the
+    API. With allow_fetch=False the API is never called (no credits spent):
+    cached odds of any age are used, or none."""
     if sport_key in memo:
         return memo[sport_key]
 
@@ -385,11 +417,15 @@ def load_games(
     if snapshot.exists:
         cached = snapshot.to_dict() or {}
         fetched_at = cached.get("fetchedAt")
-        if fetched_at and datetime.now(timezone.utc) - fetched_at < timedelta(
+        fresh = fetched_at and datetime.now(timezone.utc) - fetched_at < timedelta(
             minutes=ODDS_CACHE_MINUTES
-        ):
+        )
+        if fresh or not allow_fetch:
             memo[sport_key] = (cached.get("games", []), cached.get("requestsRemaining"))
             return memo[sport_key]
+
+    if not allow_fetch:
+        return [], None
 
     games, remaining = fetch_odds(sport_key)
     cache_ref.set(
@@ -401,6 +437,128 @@ def load_games(
     )
     memo[sport_key] = (games, remaining)
     return memo[sport_key]
+
+
+# --------------------------------------------------------------------------
+# Bet rounding: round stakes so they look like ordinary bets
+# --------------------------------------------------------------------------
+#
+#              under $10    $10 to $50    over $50
+#   light        $0.50         $1            $5
+#   heavy        $1            $2            $10
+#
+# "none" keeps the original behavior: bet the boost's max, round the hedge to
+# the nearest 50 cents. Light and heavy apply to every stake (boosted and
+# hedge), and the stakes are chosen to maximize guaranteed profit under those
+# rules, which can mean betting a little under the boost's max.
+
+ROUNDING_MODES = ("none", "light", "heavy")
+ROUNDING_STEPS = {  # mode: (step under $10, step $10-$50, step over $50)
+    "light": (0.5, 1.0, 5.0),
+    "heavy": (1.0, 2.0, 10.0),
+}
+_EPS = 1e-9
+
+
+def _is_multiple(x: float, step: float) -> bool:
+    return abs(x / step - round(x / step)) < 1e-6
+
+
+def round_stake_down(mode: str, x: float) -> float:
+    """Largest allowed stake <= x (0 if none)."""
+    small, mid, large = ROUNDING_STEPS[mode]
+    if x > 50:
+        v = math.floor(x / large + _EPS) * large
+        if v > 50:
+            return round(v, 2)
+        x = 50.0
+    if x >= 10:
+        v = math.floor(x / mid + _EPS) * mid
+        if v >= 10:
+            return round(v, 2)
+        x = 10 - _EPS
+    return round(max(0.0, math.floor(x / small + _EPS) * small), 2)
+
+
+def round_stake_up(mode: str, x: float) -> float:
+    """Smallest allowed stake >= x."""
+    small, mid, large = ROUNDING_STEPS[mode]
+    if x < 10:
+        v = max(small, math.ceil(x / small - _EPS) * small)
+        if v < 10:
+            return round(v, 2)
+        return 10.0
+    if x <= 50:
+        v = math.ceil(x / mid - _EPS) * mid
+        if v <= 50:
+            return round(v, 2)
+    v = math.ceil(max(x, 50 + _EPS) / large - _EPS) * large
+    if v <= 50:
+        v += large
+    return round(v, 2)
+
+
+def is_allowed_stake(mode: str, x: float) -> bool:
+    small, mid, large = ROUNDING_STEPS[mode]
+    if x <= 0:
+        return False
+    if x < 10:
+        return _is_multiple(x, small)
+    if x <= 50:
+        return _is_multiple(x, mid)
+    return _is_multiple(x, large)
+
+
+def allowed_stakes_up_to(mode: str, limit: float) -> list[float]:
+    """Every allowed stake from the smallest up to limit, ascending."""
+    values, v = [], round_stake_up(mode, 0.01)
+    while v <= limit + _EPS:
+        values.append(v)
+        v = round_stake_up(mode, v + 0.001)
+    return values
+
+
+def _hedge_candidates(mode: str, ideal: float, cap: float | None = None) -> set[float]:
+    """Allowed stakes just below and above the ideal hedge (within cap)."""
+    options = {round_stake_down(mode, ideal), round_stake_up(mode, ideal)}
+    if cap is not None:
+        options.add(round_stake_down(mode, cap))
+        options = {o for o in options if o <= cap + _EPS}
+    return {o for o in options if o > 0}
+
+
+def _profit(stakes: list[float], mults: list[float]) -> float:
+    return min(s * m for s, m in zip(stakes, mults)) - sum(stakes)
+
+
+def best_rounded_one_way(
+    mode: str, boosted_mult: float, hedge_mult: float, max_bet: float
+) -> tuple[float, float] | None:
+    """(boosted stake, hedge stake) with the most guaranteed profit, all
+    stakes allowed under the rounding mode and boosted stake <= max_bet."""
+    best, best_key = None, None
+    for stake in allowed_stakes_up_to(mode, max_bet):
+        for hedge in _hedge_candidates(mode, stake * boosted_mult / hedge_mult):
+            profit = _profit([stake, hedge], [boosted_mult, hedge_mult])
+            key = (round(profit, 6), -(stake + hedge))  # then prefer less staked
+            if best_key is None or key > best_key:
+                best, best_key = (stake, hedge), key
+    return best
+
+
+def best_rounded_two_way(
+    mode: str, mult_a: float, mult_b: float, max_a: float, max_b: float
+) -> tuple[float, float] | None:
+    """(stake a, stake b) with the most guaranteed profit, both within their
+    boost's max bet and allowed under the rounding mode."""
+    best, best_key = None, None
+    for stake_a in allowed_stakes_up_to(mode, max_a):
+        for stake_b in _hedge_candidates(mode, stake_a * mult_a / mult_b, cap=max_b):
+            profit = _profit([stake_a, stake_b], [mult_a, mult_b])
+            key = (round(profit, 6), -(stake_a + stake_b))
+            if best_key is None or key > best_key:
+                best, best_key = (stake_a, stake_b), key
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -506,12 +664,21 @@ def _build_result(
     return result
 
 
-def one_way(matchup: Matchup, boosted: Leg, hedge: Leg, boost: Boost) -> dict[str, Any] | None:
-    """Bet the boost's max on the boosted side, hedge the other side unboosted."""
-    stake = round(boost.max_bet, 2)
+def one_way(
+    matchup: Matchup, boosted: Leg, hedge: Leg, boost: Boost, mode: str = "none"
+) -> dict[str, Any] | None:
+    """Boost one side, hedge the other side unboosted."""
     boosted_mult = payout_multiplier(boosted.odds, boost.percent)
     hedge_mult = payout_multiplier(hedge.odds)
-    hedge_stake = round_stake(stake * boosted_mult / hedge_mult)
+    if mode == "none":
+        # Original behavior: bet the max, hedge to the nearest 50 cents.
+        stake = round(boost.max_bet, 2)
+        hedge_stake = round_stake(stake * boosted_mult / hedge_mult)
+    else:
+        stakes = best_rounded_one_way(mode, boosted_mult, hedge_mult, boost.max_bet)
+        if stakes is None:
+            return None
+        stake, hedge_stake = stakes
     return _build_result(
         matchup,
         "one_way",
@@ -520,7 +687,7 @@ def one_way(matchup: Matchup, boosted: Leg, hedge: Leg, boost: Boost) -> dict[st
 
 
 def two_way(
-    matchup: Matchup, boost_a: Boost, boost_b: Boost
+    matchup: Matchup, boost_a: Boost, boost_b: Boost, mode: str = "none"
 ) -> dict[str, Any] | None:
     """Both sides boosted. Balance payouts while keeping each stake within its
     boost's max bet (the boost doesn't apply above it)."""
@@ -528,13 +695,19 @@ def two_way(
     mult_a = payout_multiplier(a.odds, boost_a.percent)
     mult_b = payout_multiplier(b.odds, boost_b.percent)
 
-    stake_a = round(boost_a.max_bet, 2)
-    needed_b = stake_a * mult_a / mult_b
-    if needed_b <= boost_b.max_bet:
-        stake_b = round_stake(needed_b, cap=boost_b.max_bet)
+    if mode != "none":
+        stakes = best_rounded_two_way(mode, mult_a, mult_b, boost_a.max_bet, boost_b.max_bet)
+        if stakes is None:
+            return None
+        stake_a, stake_b = stakes
     else:
-        stake_b = round(boost_b.max_bet, 2)
-        stake_a = round_stake(stake_b * mult_b / mult_a, cap=boost_a.max_bet)
+        stake_a = round(boost_a.max_bet, 2)
+        needed_b = stake_a * mult_a / mult_b
+        if needed_b <= boost_b.max_bet:
+            stake_b = round_stake(needed_b, cap=boost_b.max_bet)
+        else:
+            stake_b = round(boost_b.max_bet, 2)
+            stake_a = round_stake(stake_b * mult_b / mult_a, cap=boost_a.max_bet)
 
     return _build_result(
         matchup,
@@ -544,15 +717,15 @@ def two_way(
 
 
 def find_opportunities(
-    matchup: Matchup, boosts: list[Boost], now: datetime
+    matchup: Matchup, boosts: list[Boost], now: datetime, mode: str = "none"
 ) -> list[dict[str, Any]]:
     a, b = matchup.leg_a, matchup.leg_b
     boosts_a = [x for x in boosts if x.applies_to(a.bookmaker, matchup.bet_type, a.odds, now)]
     boosts_b = [x for x in boosts if x.applies_to(b.bookmaker, matchup.bet_type, b.odds, now)]
 
-    candidates = [one_way(matchup, a, b, boost) for boost in boosts_a]
-    candidates += [one_way(matchup, b, a, boost) for boost in boosts_b]
-    candidates += [two_way(matchup, x, y) for x in boosts_a for y in boosts_b]
+    candidates = [one_way(matchup, a, b, boost, mode) for boost in boosts_a]
+    candidates += [one_way(matchup, b, a, boost, mode) for boost in boosts_b]
+    candidates += [two_way(matchup, x, y, mode) for x in boosts_a for y in boosts_b]
     return [c for c in candidates if c and c["guaranteedProfit"] > 0]
 
 
@@ -777,12 +950,17 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
             boosts.append(boost)
 
     active = [b for b in boosts if b.is_active(now)]
-    opportunities: list[dict[str, Any]] = []
+    # Hedges are computed for every rounding mode, so the app can switch
+    # between them instantly (no extra API calls: same odds, different math).
+    opportunities: dict[str, list[dict[str, Any]]] = {mode: [] for mode in ROUNDING_MODES}
     errors: list[str] = []
     out_of_season: list[str] = []
     requests_remaining = None
 
     league_types = sorted({b.bet_type for b in active})
+    # Leagues where every active boost is already used don't spend credits;
+    # their hedge cards use whatever odds are already cached.
+    fetchable = {b.bet_type for b in active if not b.used}
     if league_types:
         try:
             active_keys = load_active_sport_keys(memo)
@@ -794,11 +972,15 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
         for bet_type in league_types:
             sport_keys = resolve_sport_keys(bet_type, active_keys)
             if not sport_keys:
-                out_of_season.append(bet_type)
+                if bet_type in fetchable:
+                    out_of_season.append(bet_type)
                 continue
             for sport_key in sport_keys:
                 try:
-                    games, requests_remaining = load_games(sport_key, memo)
+                    games, remaining = load_games(
+                        sport_key, memo, allow_fetch=bet_type in fetchable
+                    )
+                    requests_remaining = remaining or requests_remaining
                 except OddsApiError as error:
                     print(f"Odds error for {sport_key}: {error}")
                     errors.append(str(error))
@@ -806,16 +988,57 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
                 for game in games:
                     for matchup in build_matchups(game, bet_type):
                         if matchup.commence_time > now:
-                            opportunities.extend(find_opportunities(matchup, active, now))
+                            for mode in ROUNDING_MODES:
+                                opportunities[mode].extend(
+                                    find_opportunities(matchup, active, now, mode)
+                                )
 
-    groups = group_opportunities(opportunities, {b.id: b for b in active})
-    _replace_collection(user_ref.collection("hedge_groups"), groups)
+    boosts_by_id = {b.id: b for b in active}
+    groups_by_mode = {
+        mode: group_opportunities(opportunities[mode], boosts_by_id)
+        for mode in ROUNDING_MODES
+    }
+    plans = {
+        mode: build_best_plan(groups_by_mode[mode], active) for mode in ROUNDING_MODES
+    }
+
+    # One doc per boost combination. Top-level bets/bestProfit/betCount are the
+    # "none" results (so older app versions keep working); "modes" has all three.
+    merged: dict[str, dict[str, Any]] = {}
+    for mode in ROUNDING_MODES:
+        for gid, group in groups_by_mode[mode].items():
+            doc = merged.setdefault(
+                gid,
+                {
+                    "type": group["type"],
+                    "boostIds": group["boostIds"],
+                    "boosts": group["boosts"],
+                    "usedBoostIds": group["usedBoostIds"],
+                    "bestProfit": 0,
+                    "betCount": 0,
+                    "bets": [],
+                    "modes": {},
+                },
+            )
+            doc["modes"][mode] = {
+                "bestProfit": group["bestProfit"],
+                "betCount": group["betCount"],
+                "bets": group["bets"],
+            }
+            if mode == "none":
+                doc.update(bestProfit=group["bestProfit"], betCount=group["betCount"], bets=group["bets"])
+    _replace_collection(user_ref.collection("hedge_groups"), merged)
     _replace_collection(user_ref.collection("opportunities"), {})  # old format, now unused
 
-    plan = build_best_plan(groups, active)
     user_ref.collection("meta").document("plan").set(
-        {**plan, "computedAt": firestore.SERVER_TIMESTAMP}
+        {**plans["none"], "modes": plans, "computedAt": firestore.SERVER_TIMESTAMP}
     )
+
+    # The status message describes the rounding mode the user has selected.
+    settings = user_ref.collection("settings").document("preferences").get().to_dict() or {}
+    selected = settings.get("roundingMode")
+    selected = selected if selected in ROUNDING_MODES else "none"
+    plan = plans[selected]
 
     if not boosts and not unreadable and not unsupported:
         message = "Add a boost to start finding hedges."
@@ -826,7 +1049,8 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
     elif plan["steps"]:
         message = (
             f"Best plan: ${plan['totalProfit']:.2f} guaranteed from "
-            f"{_plural(len(plan['steps']), 'bet')}."
+            f"{_plural(len(plan['steps']), 'bet')}"
+            + ("." if selected == "none" else f" ({selected} rounding).")
         )
     else:
         message = "No profitable hedges with current odds."
@@ -839,13 +1063,18 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
     if errors:
         message += " Odds error: " + " ".join(errors)
 
+    quota = db().collection("odds_cache").document("_quota").get().to_dict() or {}
     status = {
         "lastRunAt": firestore.SERVER_TIMESTAMP,
         "ok": not errors,
         "message": message,
-        "opportunityCount": len(opportunities),
-        "groupCount": len(groups),
+        "opportunityCount": len(opportunities[selected]),
+        "groupCount": len(groups_by_mode[selected]),
         "requestsRemaining": requests_remaining,
+        # Odds API credits for the month, shown as a bar in the app.
+        "quotaRemaining": quota.get("remaining"),
+        "quotaUsed": quota.get("used"),
+        "quotaUpdatedAt": quota.get("updatedAt"),
     }
     user_ref.collection("meta").document("status").set(status)
     print(f"Refreshed {uid}: {message}")
@@ -853,7 +1082,7 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
     return {
         "ok": not errors,
         "message": message,
-        "opportunityCount": len(opportunities),
+        "opportunityCount": len(opportunities[selected]),
     }
 
 
@@ -877,9 +1106,17 @@ def _record_failure(uid: str, error: Exception) -> None:
 # --------------------------------------------------------------------------
 
 
-@scheduler_fn.on_schedule(schedule="every 2 hours", timeout_sec=300)
+@scheduler_fn.on_schedule(
+    # Minute 0 of hours 7, 10, 13, 16, and 19 (7 AM to 7 PM, every 3 hours),
+    # Denver time. Daylight saving time is handled automatically.
+    schedule="0 7-19/3 * * *",
+    timezone=ZoneInfo("America/Denver"),
+    timeout_sec=300,
+    secrets=[ODDS_API_KEY],
+)
 def scheduled_refresh(event: scheduler_fn.ScheduledEvent) -> None:
-    """Re-check every user who has boosts. Odds are fetched once per league."""
+    """Re-check every user who has boosts, 5 times a day. Odds are fetched
+    once per league per run (3 credits each)."""
     user_ids = {
         snap.reference.parent.parent.id
         for snap in db().collection_group("boosts").stream()
@@ -892,7 +1129,9 @@ def scheduled_refresh(event: scheduler_fn.ScheduledEvent) -> None:
             _record_failure(uid, error)
 
 
-@firestore_fn.on_document_written(document="users/{userId}/boosts/{boostId}", timeout_sec=120)
+@firestore_fn.on_document_written(
+    document="users/{userId}/boosts/{boostId}", timeout_sec=120, secrets=[ODDS_API_KEY]
+)
 def on_boost_changed(event: firestore_fn.Event) -> None:
     """Recalculate as soon as a boost is added, edited, or deleted in the app."""
     uid = event.params["userId"]
@@ -902,7 +1141,7 @@ def on_boost_changed(event: firestore_fn.Event) -> None:
         _record_failure(uid, error)
 
 
-@https_fn.on_call(timeout_sec=120)
+@https_fn.on_call(timeout_sec=120, secrets=[ODDS_API_KEY])
 def refresh_opportunities(req: https_fn.CallableRequest) -> dict[str, Any]:
     """Called from the app's refresh button and pull-to-refresh."""
     if req.auth is None:

@@ -107,7 +107,12 @@ class _BoostsPageState extends State<BoostsPage> {
 
     var groups = <HedgeGroup>[];
     try {
-      groups = await widget.repository.fetchHedgeGroups();
+      // Show the hedges with the same rounding as the Hedges tab.
+      final mode = await widget.repository.fetchRoundingMode();
+      groups = [
+        for (final group in await widget.repository.fetchHedgeGroups())
+          group.withMode(mode),
+      ];
     } catch (_) {
       // Offline or not loaded yet: the picker still offers "just mark used".
     }

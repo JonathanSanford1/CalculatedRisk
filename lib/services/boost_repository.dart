@@ -4,6 +4,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import '../models/best_plan.dart';
 import '../models/opportunity.dart';
 import '../models/profit_boost.dart';
+import '../models/rounding.dart';
 
 /// Everything the app reads from or sends to Firebase for one user.
 ///
@@ -11,6 +12,7 @@ import '../models/profit_boost.dart';
 ///   users/{uid}/hedge_groups    the Cloud Function writes these
 ///   users/{uid}/meta/status     the Cloud Function writes this
 ///   users/{uid}/meta/plan       the Cloud Function writes this (best plan)
+///   users/{uid}/settings/preferences   the app writes this (rounding mode)
 class BoostRepository {
   BoostRepository({required String uid})
       : _user = FirebaseFirestore.instance.collection('users').doc(uid);
@@ -97,12 +99,38 @@ class BoostRepository {
         .toList();
   }
 
-  Stream<BestPlan?> watchPlan() {
+  /// The best plan for every rounding mode.
+  Stream<BestPlanSet?> watchPlans() {
     return _user.collection('meta').doc('plan').snapshots().map((snapshot) {
       final data = snapshot.data();
-      return data == null ? null : BestPlan.fromMap(data);
+      return data == null ? null : BestPlanSet.fromMap(data);
     });
   }
+
+  // Rounding preference
+
+  DocumentReference<Map<String, dynamic>> get _preferences =>
+      _user.collection('settings').doc('preferences');
+
+  Stream<RoundingMode> watchRoundingMode() => _preferences
+      .snapshots()
+      .map((snapshot) => RoundingMode.fromName(snapshot.data()?['roundingMode']));
+
+  Future<RoundingMode> fetchRoundingMode() async {
+    try {
+      final snapshot = await _preferences.get();
+      return RoundingMode.fromName(snapshot.data()?['roundingMode']);
+    } catch (_) {
+      return RoundingMode.none;
+    }
+  }
+
+  /// Saves the selection (the Cloud Function also uses it for its status
+  /// message). Switching is instant: hedges exist for every mode already.
+  Future<void> setRoundingMode(RoundingMode mode) => _preferences.set(
+        {'roundingMode': mode.name},
+        SetOptions(merge: true),
+      );
 
   Stream<RefreshStatus?> watchStatus() {
     return _user.collection('meta').doc('status').snapshots().map((snapshot) {

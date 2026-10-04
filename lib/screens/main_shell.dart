@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/boost_repository.dart';
 import 'boosts_page.dart';
 import 'hedges_page.dart';
+import '../widgets/brand_app_bar.dart';
 
 /// App frame with the Boosts and Hedges tabs.
 class MainShell extends StatefulWidget {
@@ -20,7 +21,7 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('CalculatedRisk')),
+      appBar: const BrandAppBar(),
       // IndexedStack keeps both tabs alive, so switching doesn't reload data.
       body: IndexedStack(
         index: _tab,

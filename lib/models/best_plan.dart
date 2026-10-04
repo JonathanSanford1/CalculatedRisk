@@ -1,4 +1,5 @@
 import 'opportunity.dart';
+import 'rounding.dart';
 
 /// Why a boost in the plan is used alone: its best pairing, for comparison.
 class PlanAlternative {
@@ -90,4 +91,28 @@ class BestPlan {
             GroupBoost.fromMap(Map<String, dynamic>.from(b as Map)),
         ],
       );
+}
+
+/// The best plan for each rounding mode.
+class BestPlanSet {
+  const BestPlanSet(this.plans);
+
+  final Map<RoundingMode, BestPlan> plans;
+
+  BestPlan? planFor(RoundingMode mode) => plans[mode];
+
+  factory BestPlanSet.fromMap(Map<String, dynamic> data) {
+    final plans = <RoundingMode, BestPlan>{};
+    final rawModes = data['modes'];
+    if (rawModes is Map) {
+      for (final entry in rawModes.entries) {
+        plans[RoundingMode.fromName(entry.key)] =
+            BestPlan.fromMap(Map<String, dynamic>.from(entry.value as Map));
+      }
+    } else {
+      // Saved before rounding modes existed: top-level is "no rounding".
+      plans[RoundingMode.none] = BestPlan.fromMap(data);
+    }
+    return BestPlanSet(plans);
+  }
 }
