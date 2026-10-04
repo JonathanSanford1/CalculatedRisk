@@ -2,56 +2,93 @@ import 'package:flutter/material.dart';
 
 import '../models/profit_boost.dart';
 import '../utils/format.dart';
+import 'opportunity_card.dart';
 
 class BoostCard extends StatelessWidget {
   const BoostCard({
     super.key,
     required this.boost,
     required this.accent,
+    required this.onEdit,
     required this.onDelete,
+    required this.onToggleUsed,
   });
 
   final ProfitBoost boost;
   final Color accent;
+  final VoidCallback onEdit;
   final VoidCallback onDelete;
+  final VoidCallback onToggleUsed;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final status = boost.statusAt(DateTime.now());
+    final used = boost.used;
+    final color = used ? Colors.grey.shade600 : accent;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: used ? Colors.grey.shade50 : null,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: accent, width: 1.5),
+        side: BorderSide(
+          color: used ? Colors.grey.shade400 : accent,
+          width: 1.5,
+        ),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 4, 14),
+        padding: const EdgeInsets.fromLTRB(16, 6, 4, 6),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Text(
-                  '+${formatPercent(boost.percentBoost)}',
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: accent,
+                Expanded(
+                  child: Row(
+                    children: [
+                      Text(
+                        '+${formatPercent(boost.percentBoost)}',
+                        style: theme.textTheme.headlineSmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: color,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          boost.betType.label,
+                          style: theme.textTheme.titleMedium,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(boost.betType.label, style: theme.textTheme.titleMedium),
-                const Spacer(),
-                _StatusBadge(status: status),
+                used ? const _UsedBadge() : _StatusBadge(status: status),
+                IconButton(
+                  icon: const Icon(Icons.edit_outlined),
+                  tooltip: 'Edit boost',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onEdit,
+                ),
                 IconButton(
                   icon: const Icon(Icons.delete_outline),
                   tooltip: 'Delete boost',
+                  visualDensity: VisualDensity.compact,
                   onPressed: onDelete,
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+            if (boost.hasNickname)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  boost.nickname!.trim(),
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600),
+                ),
+              ),
             Wrap(
               spacing: 16,
               runSpacing: 6,
@@ -72,6 +109,58 @@ class BoostCard extends StatelessWidget {
               icon: Icons.schedule,
               text:
                   '${formatDateTime(boost.validFrom)} – ${formatDateTime(boost.validUntil)}',
+            ),
+            if (!boost.betType.autoMatched) ...[
+              const SizedBox(height: 6),
+              const _Detail(
+                icon: Icons.info_outline,
+                text: 'Not checked for hedges (league not supported)',
+              ),
+            ],
+            if (used) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(right: 12),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade200,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      boost.usedAt == null
+                          ? 'Used'
+                          : 'Used ${formatDateTime(boost.usedAt!)}',
+                      style: theme.textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 4),
+                    boost.placedBet == null
+                        ? Text('No hedge recorded',
+                            style: theme.textTheme.bodySmall)
+                        : PlacedBetSummary(bet: boost.placedBet!),
+                  ],
+                ),
+              ),
+            ],
+            Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4, right: 4),
+                child: used
+                    ? TextButton.icon(
+                        onPressed: onToggleUsed,
+                        icon: const Icon(Icons.undo, size: 18),
+                        label: const Text('Mark unused'),
+                      )
+                    : FilledButton.tonalIcon(
+                        onPressed: onToggleUsed,
+                        icon: const Icon(Icons.check_circle_outline, size: 18),
+                        label: const Text('Mark used'),
+                      ),
+              ),
             ),
           ],
         ),
@@ -95,6 +184,29 @@ class _Detail extends StatelessWidget {
         const SizedBox(width: 4),
         Flexible(child: Text(text)),
       ],
+    );
+  }
+}
+
+class _UsedBadge extends StatelessWidget {
+  const _UsedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade700,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: const Text(
+        'Used',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }

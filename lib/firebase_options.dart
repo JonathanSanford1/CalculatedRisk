@@ -56,7 +56,6 @@ class DefaultFirebaseOptions {
     projectId: 'calculatedrisk-d1d3f',
     storageBucket: 'calculatedrisk-d1d3f.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyCcQxt-V4eGOtls2uomZDy1mDzfAoV-8DA',
     appId: '1:854556320532:ios:58658c80a90dba81e89801',

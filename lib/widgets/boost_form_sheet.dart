@@ -2,13 +2,18 @@ import 'package:flutter/material.dart';
 
 import '../models/profit_boost.dart';
 import '../utils/format.dart';
+import 'league_picker.dart';
 
-/// Bottom sheet for creating a boost. Pops with a [ProfitBoost] on save,
-/// or null if the user dismisses it.
+/// Bottom sheet for creating or editing a boost. Pops with the saved
+/// [ProfitBoost], or null if the user dismisses it.
 class BoostFormSheet extends StatefulWidget {
-  const BoostFormSheet({super.key, required this.section});
+  const BoostFormSheet({super.key, required this.sportsbook, this.initial});
 
-  final BoostSection section;
+  /// Sportsbook to start with (the section the user tapped + in).
+  final Sportsbook sportsbook;
+
+  /// The boost being edited, or null when creating a new one.
+  final ProfitBoost? initial;
 
   @override
   State<BoostFormSheet> createState() => _BoostFormSheetState();
@@ -16,32 +21,57 @@ class BoostFormSheet extends StatefulWidget {
 
 class _BoostFormSheetState extends State<BoostFormSheet> {
   final _formKey = GlobalKey<FormState>();
+  final _nicknameCtrl = TextEditingController();
   final _percentCtrl = TextEditingController();
   final _minOddsCtrl = TextEditingController();
   final _maxOddsCtrl = TextEditingController();
   final _maxBetCtrl = TextEditingController();
 
+  late Sportsbook _sportsbook;
   BetType _betType = BetType.nfl;
   late DateTime _validFrom;
   late DateTime _validUntil;
   String? _dateError;
 
+  bool get _isEditing => widget.initial != null;
+
   @override
   void initState() {
     super.initState();
-    final now = DateTime.now();
-    _validFrom = DateTime(now.year, now.month, now.day, now.hour, now.minute);
-    _validUntil = DateTime(now.year, now.month, now.day, 23, 59);
+    _sportsbook = widget.sportsbook;
+
+    final boost = widget.initial;
+    if (boost != null) {
+      _sportsbook = boost.sportsbook;
+      _betType = boost.betType;
+      _validFrom = boost.validFrom;
+      _validUntil = boost.validUntil;
+      _nicknameCtrl.text = boost.nickname ?? '';
+      _percentCtrl.text = _plainNumber(boost.percentBoost);
+      _minOddsCtrl.text = formatOdds(boost.minOdds);
+      _maxOddsCtrl.text = formatOdds(boost.maxOdds);
+      _maxBetCtrl.text = _plainNumber(boost.maxBet);
+    } else {
+      final now = DateTime.now();
+      _validFrom = DateTime(now.year, now.month, now.day, now.hour, now.minute);
+      _validUntil = DateTime(now.year, now.month, now.day, 23, 59);
+    }
   }
 
   @override
   void dispose() {
+    _nicknameCtrl.dispose();
     _percentCtrl.dispose();
     _minOddsCtrl.dispose();
     _maxOddsCtrl.dispose();
     _maxBetCtrl.dispose();
     super.dispose();
   }
+
+  /// 25.0 -> "25", 37.5 -> "37.5"
+  static String _plainNumber(double value) => value == value.roundToDouble()
+      ? value.toStringAsFixed(0)
+      : value.toString();
 
   // Accepts "-110", "+150", or "150".
   int? _parseOdds(String? value) =>
@@ -62,6 +92,11 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
       return 'Max odds must be at least min odds';
     }
     return null;
+  }
+
+  Future<void> _pickLeague() async {
+    final league = await showLeaguePicker(context, _betType);
+    if (league != null && mounted) setState(() => _betType = league);
   }
 
   Future<void> _pickDateTime({required bool isStart}) async {
@@ -99,10 +134,13 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
     setState(() => _dateError = datesValid ? null : 'End must be after start');
     if (!fieldsValid || !datesValid) return;
 
+    final nickname = _nicknameCtrl.text.trim();
     Navigator.of(context).pop(
       ProfitBoost(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        section: widget.section,
+        id: widget.initial?.id ??
+            DateTime.now().microsecondsSinceEpoch.toString(),
+        sportsbook: _sportsbook,
+        nickname: nickname.isEmpty ? null : nickname,
         percentBoost: double.parse(_percentCtrl.text.trim()),
         betType: _betType,
         minOdds: _parseOdds(_minOddsCtrl.text)!,
@@ -118,8 +156,6 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
-    final sectionName =
-        widget.section == BoostSection.green ? 'green' : 'blue';
     const signedNumber = TextInputType.numberWithOptions(signed: true);
     const decimalNumber = TextInputType.numberWithOptions(decimal: true);
 
@@ -132,8 +168,32 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('New $sectionName boost', style: theme.textTheme.titleLarge),
+              Text(
+                _isEditing ? 'Edit boost' : 'New boost',
+                style: theme.textTheme.titleLarge,
+              ),
               const SizedBox(height: 16),
+              SegmentedButton<Sportsbook>(
+                segments: [
+                  for (final book in Sportsbook.values)
+                    ButtonSegment(value: book, label: Text(book.label)),
+                ],
+                selected: {_sportsbook},
+                onSelectionChanged: (selection) =>
+                    setState(() => _sportsbook = selection.first),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _nicknameCtrl,
+                textCapitalization: TextCapitalization.sentences,
+                maxLength: 40,
+                decoration: const InputDecoration(
+                  labelText: 'Nickname (optional)',
+                  hintText: 'e.g. Sunday NFL boost',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
               TextFormField(
                 controller: _percentCtrl,
                 keyboardType: decimalNumber,
@@ -148,19 +208,14 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
                 },
               ),
               const SizedBox(height: 16),
-              Text('Bet type', style: theme.textTheme.labelLarge),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (final type in BetType.values)
-                    ChoiceChip(
-                      label: Text(type.label),
-                      selected: _betType == type,
-                      onSelected: (_) => setState(() => _betType = type),
-                    ),
-                ],
+              _TapField(
+                label: 'League',
+                text: _betType.label,
+                icon: Icons.expand_more,
+                onTap: _pickLeague,
+                helperText: _betType.autoMatched
+                    ? null
+                    : 'Saved, but hedges aren\'t searched for this league.',
               ),
               const SizedBox(height: 16),
               Row(
@@ -196,15 +251,17 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
                 ],
               ),
               const SizedBox(height: 16),
-              _DateTimeField(
+              _TapField(
                 label: 'Valid from',
-                value: _validFrom,
+                text: '${formatDateTime(_validFrom)}, ${_validFrom.year}',
+                icon: Icons.event,
                 onTap: () => _pickDateTime(isStart: true),
               ),
               const SizedBox(height: 12),
-              _DateTimeField(
+              _TapField(
                 label: 'Valid until',
-                value: _validUntil,
+                text: '${formatDateTime(_validUntil)}, ${_validUntil.year}',
+                icon: Icons.event,
                 errorText: _dateError,
                 onTap: () => _pickDateTime(isStart: false),
               ),
@@ -230,7 +287,7 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
-                child: const Text('Add boost'),
+                child: Text(_isEditing ? 'Save changes' : 'Add boost'),
               ),
             ],
           ),
@@ -240,19 +297,23 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
   }
 }
 
-/// A tappable field that looks like a text input and opens date + time pickers.
-class _DateTimeField extends StatelessWidget {
-  const _DateTimeField({
+/// A tappable field that looks like a text input (for pickers).
+class _TapField extends StatelessWidget {
+  const _TapField({
     required this.label,
-    required this.value,
+    required this.text,
+    required this.icon,
     required this.onTap,
     this.errorText,
+    this.helperText,
   });
 
   final String label;
-  final DateTime value;
+  final String text;
+  final IconData icon;
   final VoidCallback onTap;
   final String? errorText;
+  final String? helperText;
 
   @override
   Widget build(BuildContext context) {
@@ -263,10 +324,12 @@ class _DateTimeField extends StatelessWidget {
         decoration: InputDecoration(
           labelText: label,
           errorText: errorText,
+          helperText: helperText,
+          helperMaxLines: 2,
           border: const OutlineInputBorder(),
-          suffixIcon: const Icon(Icons.event),
+          suffixIcon: Icon(icon),
         ),
-        child: Text('${formatDateTime(value)}, ${value.year}'),
+        child: Text(text),
       ),
     );
   }
