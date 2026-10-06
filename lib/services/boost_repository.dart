@@ -4,6 +4,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import '../models/best_plan.dart';
 import '../models/opportunity.dart';
 import '../models/profit_boost.dart';
+import '../models/hedge_goal.dart';
 import '../models/rounding.dart';
 
 /// Everything the app reads from or sends to Firebase for one user.
@@ -43,15 +44,17 @@ class BoostRepository {
 
   // Marking boosts used
 
-  /// Records that [bet] was placed: every boost it uses (one, or two for a
-  /// two-way hedge) is marked used, with the hedge saved on it.
-  Future<void> markPlaced(Opportunity bet) {
+  /// Records that [bet] was placed with [version]'s amounts: every boost it
+  /// uses (one, or two for a two-way hedge) is marked used, with the hedge
+  /// saved on it.
+  Future<void> markPlaced(Opportunity bet, HedgeVersion version) {
+    final record = bet.placedRecord(version);
     final batch = FirebaseFirestore.instance.batch();
     for (final id in bet.boostIds) {
       batch.update(_boosts.doc(id), {
         'used': true,
         'usedAt': FieldValue.serverTimestamp(),
-        'placedBet': bet.raw,
+        'placedBet': record,
       });
     }
     return batch.commit();
@@ -132,6 +135,37 @@ class BoostRepository {
         SetOptions(merge: true),
       );
 
+  /// Rounding, goal, and same-sportsbook settings together.
+  Stream<Preferences> watchPreferences() => _preferences
+      .snapshots()
+      .map((snapshot) => Preferences.fromMap(snapshot.data() ?? const {}));
+
+  Future<void> setGoal(HedgeGoal goal) =>
+      _preferences.set({'hedgeGoal': goal.name}, SetOptions(merge: true));
+
+  /// Same-sportsbook hedges change which hedges exist, so the Cloud Function
+  /// recalculates right after this is saved.
+  Future<String> setAllowSameBook(bool allow) async {
+    await _preferences.set({'allowSameBook': allow}, SetOptions(merge: true));
+    return refreshNow();
+  }
+
+  // Game picker
+
+  /// Upcoming games in [league] for single-game boosts (costs no API credits).
+  Future<List<GameOption>> listGames(BetType league) async {
+    final callable = FirebaseFunctions.instance.httpsCallable(
+      'list_games',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable.call({'league': league.name});
+    final data = Map<String, dynamic>.from(result.data as Map);
+    return [
+      for (final g in (data['games'] as List? ?? const []))
+        GameOption.fromMap(Map<String, dynamic>.from(g as Map)),
+    ];
+  }
+
   Stream<RefreshStatus?> watchStatus() {
     return _user.collection('meta').doc('status').snapshots().map((snapshot) {
       final data = snapshot.data();
@@ -149,4 +183,44 @@ class BoostRepository {
     final data = Map<String, dynamic>.from(result.data as Map);
     return data['message'] as String? ?? 'Hedges updated.';
   }
+}
+
+/// The user's hedge settings.
+class Preferences {
+  const Preferences({
+    required this.roundingMode,
+    required this.goal,
+    required this.allowSameBook,
+  });
+
+  final RoundingMode roundingMode;
+  final HedgeGoal goal;
+  final bool allowSameBook;
+
+  factory Preferences.fromMap(Map<String, dynamic> data) => Preferences(
+        roundingMode: RoundingMode.fromName(data['roundingMode']),
+        goal: HedgeGoal.fromName(data['hedgeGoal']),
+        allowSameBook: data['allowSameBook'] as bool? ?? false,
+      );
+}
+
+/// A game in the boost form's game picker.
+class GameOption {
+  const GameOption({
+    required this.id,
+    required this.name,
+    required this.commenceTime,
+  });
+
+  final String id;
+  final String name; // "Bills @ Chiefs"
+  final DateTime commenceTime;
+
+  factory GameOption.fromMap(Map<String, dynamic> data) => GameOption(
+        id: data['id'] as String? ?? '',
+        name: data['name'] as String? ?? '',
+        commenceTime:
+            DateTime.tryParse(data['commenceTime'] as String? ?? '')?.toLocal() ??
+                DateTime.now(),
+      );
 }

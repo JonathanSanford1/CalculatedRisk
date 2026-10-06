@@ -110,6 +110,14 @@ class BoostCard extends StatelessWidget {
               text:
                   '${formatDateTime(boost.validFrom)} – ${formatDateTime(boost.validUntil)}',
             ),
+            if (boost.isSingleGame) ...[
+              const SizedBox(height: 6),
+              _Detail(
+                icon: Icons.sports_score,
+                text: 'Only ${boost.eventName ?? 'one game'}'
+                    '${boost.eventStart == null ? '' : ', ${formatDateTime(boost.eventStart!)}'}',
+              ),
+            ],
             if (!boost.betType.autoMatched) ...[
               const SizedBox(height: 6),
               const _Detail(

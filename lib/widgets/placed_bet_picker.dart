@@ -6,10 +6,33 @@ import '../models/opportunity.dart';
 import '../models/profit_boost.dart';
 import 'opportunity_card.dart';
 
-/// The user's answer: the hedge they placed, or null bet for "just mark used".
+/// The user's answer: the hedge they placed and with which amounts, or a
+/// null bet for "just mark used".
 class PlacedChoice {
-  const PlacedChoice(this.bet);
+  const PlacedChoice(this.bet, [this.version]);
   final Opportunity? bet;
+  final HedgeVersion? version;
+}
+
+/// Asks which amounts were bet, when a hedge has more than one version.
+Future<HedgeVersion?> _pickVersion(BuildContext context, Opportunity bet) {
+  if (bet.versions.length == 1) return Future.value(bet.safest);
+  return showDialog<HedgeVersion>(
+    context: context,
+    builder: (ctx) => SimpleDialog(
+      title: const Text('Which amounts did you bet?'),
+      children: [
+        for (final v in bet.versions)
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(v),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: PlacedBetSummary(bet: bet, version: v),
+            ),
+          ),
+      ],
+    ),
+  );
 }
 
 /// Asks which hedge was placed with [boost]. Returns null if dismissed.
@@ -96,8 +119,12 @@ Future<PlacedChoice?> showPlacedBetPicker({
                                         color: Colors.indigo.shade800),
                                   ),
                                 ),
-                          onTap: () => Navigator.of(sheetContext)
-                              .pop(PlacedChoice(bet)),
+                          onTap: () async {
+                            final version = await _pickVersion(sheetContext, bet);
+                            if (version != null && sheetContext.mounted) {
+                              Navigator.of(sheetContext).pop(PlacedChoice(bet, version));
+                            }
+                          },
                         );
                       },
                     ),

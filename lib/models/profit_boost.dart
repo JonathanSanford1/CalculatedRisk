@@ -109,6 +109,9 @@ class ProfitBoost {
     this.used = false,
     this.usedAt,
     this.placedBet,
+    this.eventId,
+    this.eventName,
+    this.eventStart,
   });
 
   final String id;
@@ -124,6 +127,13 @@ class ProfitBoost {
   final bool used; // the user marked this boost as already used
   final DateTime? usedAt;
   final Opportunity? placedBet; // the hedge the user placed, if recorded
+
+  /// Set when the boost is for one specific game ("Any bet on Bills @ Chiefs").
+  final String? eventId;
+  final String? eventName;
+  final DateTime? eventStart;
+
+  bool get isSingleGame => eventId != null && eventId!.isNotEmpty;
 
   bool get hasNickname => nickname != null && nickname!.trim().isNotEmpty;
 
@@ -150,6 +160,11 @@ class ProfitBoost {
         'validUntil': Timestamp.fromDate(validUntil),
         'maxBet': maxBet,
         'nickname': hasNickname ? nickname!.trim() : null,
+        'eventId': isSingleGame ? eventId : null,
+        'eventName': isSingleGame ? eventName : null,
+        'eventStart': isSingleGame && eventStart != null
+            ? Timestamp.fromDate(eventStart!)
+            : null,
         'updatedAt': FieldValue.serverTimestamp(),
         if (isNew) 'createdAt': FieldValue.serverTimestamp(),
       };
@@ -177,6 +192,10 @@ class ProfitBoost {
           ? null
           : Opportunity.fromMap(
               Map<String, dynamic>.from(data['placedBet'] as Map)),
+      eventId: data['eventId'] as String?,
+      eventName: data['eventName'] as String?,
+      eventStart:
+          data['eventStart'] == null ? null : readDate(data['eventStart']),
     );
   }
 }

@@ -22,6 +22,9 @@ class BoostsPage extends StatefulWidget {
 class _BoostsPageState extends State<BoostsPage> {
   late Stream<List<ProfitBoost>> _boostStream;
 
+  /// Expired boosts already being deleted (so each is deleted only once).
+  final Set<String> _deleting = {};
+
   @override
   void initState() {
     super.initState();
@@ -44,7 +47,11 @@ class _BoostsPageState extends State<BoostsPage> {
       isScrollControlled: true,
       useSafeArea: true,
       showDragHandle: true,
-      builder: (_) => BoostFormSheet(sportsbook: sportsbook, initial: existing),
+      builder: (_) => BoostFormSheet(
+        sportsbook: sportsbook,
+        initial: existing,
+        loadGames: widget.repository.listGames,
+      ),
     );
     if (boost == null) return;
 
@@ -126,9 +133,10 @@ class _BoostsPageState extends State<BoostsPage> {
     if (choice == null) return;
 
     final bet = choice.bet;
-    final update = bet == null
+    final version = choice.version;
+    final update = bet == null || version == null
         ? widget.repository.markUsed(boost.id)
-        : widget.repository.markPlaced(bet);
+        : widget.repository.markPlaced(bet, version);
     update.catchError((Object e) {
       _showError('Couldn\'t mark the boost used: $e');
     });
@@ -187,7 +195,25 @@ class _BoostsPageState extends State<BoostsPage> {
           return const Center(child: CircularProgressIndicator());
         }
 
-        final boosts = snapshot.data!;
+        // Boosts whose window has ended are deleted automatically (the Cloud
+        // Function also removes them on its next run) and hidden right away.
+        final now = DateTime.now();
+        final expired = snapshot.data!
+            .where((b) => b.validUntil.isBefore(now) && !_deleting.contains(b.id))
+            .toList();
+        if (expired.isNotEmpty) {
+          _deleting.addAll(expired.map((b) => b.id));
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            for (final b in expired) {
+              widget.repository.deleteBoost(b.id).catchError((Object e) {
+                _deleting.remove(b.id); // try again on the next update
+              });
+            }
+          });
+        }
+        final boosts = snapshot.data!
+            .where((b) => !b.validUntil.isBefore(now))
+            .toList();
         return Column(
           children: [
             for (final book in Sportsbook.values)

@@ -33,14 +33,14 @@ class BrandAppBar extends StatelessWidget implements PreferredSizeWidget {
       title: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(9),
-            child: Image.asset(
-              'assets/IMG_6015.PNG',
-              width: 34,
-              height: 34,
-              fit: BoxFit.cover,
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              gradient: _brandGradient,
+              borderRadius: BorderRadius.circular(9),
             ),
+            child: const Icon(Icons.trending_up, color: Colors.white, size: 22),
           ),
           const SizedBox(width: 10),
           const Text.rich(
