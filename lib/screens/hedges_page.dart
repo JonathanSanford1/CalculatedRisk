@@ -33,7 +33,7 @@ class _HedgesPageState extends State<HedgesPage> {
   late Stream<RefreshStatus?> _statusStream;
   late Stream<BestPlanSet?> _planStream;
   StreamSubscription<Preferences>? _prefsSubscription;
-  RoundingMode _mode = RoundingMode.none;
+  RoundingMode _mode = RoundingMode.small;
   HedgeGoal _goal = HedgeGoal.guaranteed;
   bool _allowSameBook = false;
   bool _refreshing = false;
@@ -265,7 +265,7 @@ class _HedgesPageState extends State<HedgesPage> {
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text(
-              '${_goal.description} ${_mode == RoundingMode.none ? 'No rounding' : '${_mode.label} rounding'}, '
+              '${_goal.description} ${_mode.label} rounding, '
               'same-sportsbook hedges ${_allowSameBook ? 'on' : 'off'}.',
               style: theme.textTheme.bodySmall,
             ),
