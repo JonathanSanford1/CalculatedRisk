@@ -465,68 +465,90 @@ def payout_multiplier(odds: float, boost_percent: float = 0.0) -> float:
     return 1 + winnings * (1 + boost_percent / 100)
 
 
-#              under $10    $10 to $50    over $50
-#   none         $0.50         $0.50         $0.50   (hedge amounts only;
-#                                                     boosted bets use the max)
-#   light        $0.50         $1            $5
-#   heavy        $1            $5            $10
+ROUNDING_MODES = ("small", "medium", "large")
+DEFAULT_ROUNDING_MODE = "small"
+# Values older versions of the app saved. "none" is gone; small replaces it.
+LEGACY_ROUNDING_MODES = {"none": "small", "light": "medium", "heavy": "large"}
+ 
+ 
+def normalize_rounding_mode(value) -> str:
+    """The app's saved roundingMode as one of ROUNDING_MODES."""
+    if value in ROUNDING_MODES:
+        return value
+    return LEGACY_ROUNDING_MODES.get(value, DEFAULT_ROUNDING_MODE)
+ 
+OBJECTIVES = ("guaranteed", "max")  # what hedges and the plan are ranked by
+ 
+ 
+# ============================================================================
+# EDIT 2 - Odds math and bet rounding. Delete everything from the
+# "#              under $10    $10 to $50    over $50" comment table down
+# through allowed_stakes_up_to(), and put this in its place. (american_to_decimal
+# and payout_multiplier above it stay as they are.)
+# ============================================================================
+ 
+#   Stake size:   $0-10     $10-25    $25-50    over $50
+#   small         $0.50     $1        $2.50     $5
+#   medium        $1        $2.50     $5        $10
+#   large         $1        $5        $10       $25
+#
+# A stake on a boundary ($10, $25, $50) uses the lower tier's step. Every
+# boundary is a multiple of its own tier's step, so the boundaries are
+# always allowed stakes.
+TIER_LIMITS = (10.0, 25.0, 50.0)
 ROUNDING_STEPS = {
-    "none": (0.5, 0.5, 0.5),
-    "light": (0.5, 1.0, 5.0),
-    "heavy": (1.0, 5.0, 10.0),
+    "small": (0.5, 1.0, 2.5, 5.0),
+    "medium": (1.0, 2.5, 5.0, 10.0),
+    "large": (1.0, 5.0, 10.0, 25.0),
 }
 _EPS = 1e-9
-
-
+ 
+ 
+def _tiers(mode: str) -> list[tuple[float, float, float]]:
+    """(step, low, high) for each tier: stakes in (low, high] are multiples
+    of step."""
+    lows = (0.0,) + TIER_LIMITS
+    highs = TIER_LIMITS + (math.inf,)
+    return list(zip(ROUNDING_STEPS[mode], lows, highs))
+ 
+ 
 def _is_multiple(x: float, step: float) -> bool:
     return abs(x / step - round(x / step)) < 1e-6
-
-
+ 
+ 
 def round_stake_down(mode: str, x: float) -> float:
     """Largest allowed stake <= x (0 if none)."""
-    small, mid, large = ROUNDING_STEPS[mode]
-    if x > 50:
-        v = math.floor(x / large + _EPS) * large
-        if v > 50:
+    for step, low, high in reversed(_tiers(mode)):
+        if x <= low + _EPS:
+            continue
+        v = math.floor(min(x, high) / step + _EPS) * step
+        if v > low + _EPS:
             return round(v, 2)
-        x = 50.0
-    if x >= 10:
-        v = math.floor(x / mid + _EPS) * mid
-        if v >= 10:
-            return round(v, 2)
-        x = 10 - _EPS
-    return round(max(0.0, math.floor(x / small + _EPS) * small), 2)
-
-
+    return 0.0
+ 
+ 
 def round_stake_up(mode: str, x: float) -> float:
     """Smallest allowed stake >= x."""
-    small, mid, large = ROUNDING_STEPS[mode]
-    if x < 10:
-        v = max(small, math.ceil(x / small - _EPS) * small)
-        if v < 10:
+    for step, low, high in _tiers(mode):
+        if x > high + _EPS:
+            continue
+        v = math.ceil(x / step - _EPS) * step
+        if v <= low + _EPS:  # x is at or below this tier: first stake in it
+            v = (math.floor(low / step + _EPS) + 1) * step
+        if v <= high + _EPS:
             return round(v, 2)
-        return 10.0
-    if x <= 50:
-        v = math.ceil(x / mid - _EPS) * mid
-        if v <= 50:
-            return round(v, 2)
-    v = math.ceil(max(x, 50 + _EPS) / large - _EPS) * large
-    if v <= 50:
-        v += large
-    return round(v, 2)
-
-
+    raise ValueError(f"no allowed stake >= {x}")  # unreachable: last tier is unbounded
+ 
+ 
 def is_allowed_stake(mode: str, x: float) -> bool:
-    small, mid, large = ROUNDING_STEPS[mode]
     if x <= 0:
         return False
-    if x < 10:
-        return _is_multiple(x, small)
-    if x <= 50:
-        return _is_multiple(x, mid)
-    return _is_multiple(x, large)
-
-
+    for step, _, high in _tiers(mode):
+        if x <= high + _EPS:
+            return _is_multiple(x, step)
+    return False
+ 
+ 
 def allowed_stakes_up_to(mode: str, limit: float) -> list[float]:
     """Every allowed stake from the smallest up to limit, ascending."""
     values, v = [], round_stake_up(mode, 0.01)
