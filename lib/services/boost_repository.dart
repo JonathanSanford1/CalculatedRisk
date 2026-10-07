@@ -124,7 +124,7 @@ class BoostRepository {
       final snapshot = await _preferences.get();
       return RoundingMode.fromName(snapshot.data()?['roundingMode']);
     } catch (_) {
-      return RoundingMode.none;
+      return RoundingMode.small;
     }
   }
 
