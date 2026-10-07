@@ -144,7 +144,7 @@ class BestPlanSet {
           };
         }
       } else {
-        plans[RoundingMode.none] = {HedgeGoal.guaranteed: BestPlan.fromMap(data)};
+        plans[RoundingMode.small] = {HedgeGoal.guaranteed: BestPlan.fromMap(data)};
       }
     }
     return BestPlanSet(plans);
