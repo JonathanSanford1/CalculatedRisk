@@ -387,8 +387,8 @@ class HedgeGroup {
             Map<String, dynamic>.from(entry.value as Map));
       }
     } else {
-      // Saved before rounding modes existed: top-level is "no rounding".
-      results[RoundingMode.none] = ModeResult.fromMap(data);
+      // Saved before rounding modes existed: top-level is the default mode.
+      results[RoundingMode.small] = ModeResult.fromMap(data);
     }
     return HedgeGroup(
       id: id,
@@ -404,7 +404,7 @@ class HedgeGroup {
       availableFrom: data['availableFrom'] == null
           ? null
           : readDate(data['availableFrom']),
-      mode: RoundingMode.none,
+      mode: RoundingMode.small,
       results: results,
     );
   }
