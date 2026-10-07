@@ -137,7 +137,6 @@ MARKET_LABELS = {
     "player_shots_on_target": "shots on target",
 }
 
-ROUNDING_MODES = ("none", "light", "heavy")
 OBJECTIVES = ("guaranteed", "max")  # what hedges and the plan are ranked by
 
 _db = None
@@ -477,16 +476,6 @@ def normalize_rounding_mode(value) -> str:
         return value
     return LEGACY_ROUNDING_MODES.get(value, DEFAULT_ROUNDING_MODE)
  
-OBJECTIVES = ("guaranteed", "max")  # what hedges and the plan are ranked by
- 
- 
-# ============================================================================
-# EDIT 2 - Odds math and bet rounding. Delete everything from the
-# "#              under $10    $10 to $50    over $50" comment table down
-# through allowed_stakes_up_to(), and put this in its place. (american_to_decimal
-# and payout_multiplier above it stay as they are.)
-# ============================================================================
- 
 #   Stake size:   $0-10     $10-25    $25-50    over $50
 #   small         $0.50     $1        $2.50     $5
 #   medium        $1        $2.50     $5        $10
@@ -779,7 +768,7 @@ def optimize_versions(
 ) -> dict[str, tuple[tuple[float, float], float, float]] | None:
     """Stakes (leg 0, leg 1) for each version, with (guaranteed, possible)
     profit. Anchors are boosted legs whose stake is chosen from their own
-    allowed amounts (just the max bet when not rounding); the other leg is
+    allowed amounts (every allowed amount up to the max bet); the other leg is
     fitted to it. Caps are boost max bets (None for an unboosted hedge)."""
     returns = [(_leg_return(ra, mults[0]), _leg_return(rb, mults[1])) for ra, rb in scenarios]
     tried: dict[tuple[float, float], tuple[float, float]] = {}
@@ -795,7 +784,7 @@ def optimize_versions(
         tried[stakes] = (min(profits), max(profits))
 
     def anchor_amounts(i: int) -> list[float]:
-        return [round(caps[i], 2)] if mode == "none" else allowed_stakes_up_to(mode, caps[i])
+        return allowed_stakes_up_to(mode, caps[i])
 
     def place(i: int, anchor: float, other: float) -> None:
         attempt((anchor, other) if i == 0 else (other, anchor))
@@ -920,7 +909,7 @@ def boost_fits(boost: Boost, side: Side, matchup: Matchup, now: datetime) -> boo
 
 
 def find_opportunities(
-    matchup: Matchup, boosts: list[Boost], now: datetime, mode: str = "none"
+    matchup: Matchup, boosts: list[Boost], now: datetime, mode: str = DEFAULT_ROUNDING_MODE
 ) -> list[dict[str, Any]]:
     a, b = matchup.side_a, matchup.side_b
     boosts_a = [x for x in boosts if boost_fits(x, a, matchup, now)]
@@ -1200,8 +1189,7 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
     user_ref = db().collection("users").document(uid)
 
     settings = user_ref.collection("settings").document("preferences").get().to_dict() or {}
-    selected = settings.get("roundingMode")
-    selected = selected if selected in ROUNDING_MODES else "none"
+    selected = normalize_rounding_mode(settings.get("roundingMode"))
     allow_same_book = bool(settings.get("allowSameBook", False))
 
     # Read boosts; delete any whose window has ended.
@@ -1315,7 +1303,7 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
     }
 
     # One doc per boost combination, with results for every rounding mode.
-    # Top-level bets/bestProfit/betCount are "none" (for older app versions).
+    # Top-level bets/bestProfit/betCount are "small" (for older app versions).
     merged: dict[str, dict[str, Any]] = {}
     for mode in ROUNDING_MODES:
         for gid, group in groups_by_mode[mode].items():
@@ -1326,13 +1314,13 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
             doc["modes"][mode] = {
                 key: group[key] for key in ("bestProfit", "bestMaxProfit", "betCount", "bets")
             }
-            if mode == "none":
+            if mode == DEFAULT_ROUNDING_MODE:
                 doc.update(bestProfit=group["bestProfit"], betCount=group["betCount"],
                            bets=group["bets"])
     _replace_collection(user_ref.collection("hedge_groups"), merged)
 
     user_ref.collection("meta").document("plan").set({
-        **plans["none"]["guaranteed"],
+        **plans[DEFAULT_ROUNDING_MODE]["guaranteed"],
         "modes": {mode: plans[mode]["guaranteed"] for mode in ROUNDING_MODES},  # older apps
         "plans": plans,
         "computedAt": firestore.SERVER_TIMESTAMP,
@@ -1347,7 +1335,7 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
     elif plan["steps"]:
         message = (f"Best plan: ${plan['totalProfit']:.2f} guaranteed from "
                    f"{_plural(len(plan['steps']), 'bet')}"
-                   + ("." if selected == "none" else f" ({selected} rounding)."))
+                   + f" ({selected} rounding).")
     elif not unused_active:
         message = "Your boosts' windows haven't opened yet; their hedges are shown in advance."
     else:
