@@ -48,6 +48,9 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
   String? _eventName;
   DateTime? _eventStart;
 
+  // Bet types the boost is limited to; empty means any bet.
+  List<PropType> _propTypes = [];
+
   bool get _isEditing => widget.initial != null;
 
   @override
@@ -65,6 +68,7 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
       _eventId = boost.eventId;
       _eventName = boost.eventName;
       _eventStart = boost.eventStart;
+      _propTypes = [...boost.propTypes];
       _percentCtrl.text = _plainNumber(boost.percentBoost);
       _minOddsCtrl.text = formatOdds(boost.minOdds);
       _maxOddsCtrl.text = formatOdds(boost.maxOdds);
@@ -121,7 +125,22 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
       _eventId = null;
       _eventName = null;
       _eventStart = null;
+      // Keep only the bet types this league has.
+      final available = PropType.optionsFor(league);
+      _propTypes = [for (final p in _propTypes) if (available.contains(p)) p];
     });
+  }
+
+  Future<void> _pickPropTypes() async {
+    final picked = await showDialog<List<PropType>>(
+      context: context,
+      builder: (_) => _PropTypeDialog(
+        options: PropType.optionsFor(_betType),
+        selected: _propTypes,
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() => _propTypes = picked);
   }
 
   Future<void> _pickDateTime({required bool isStart}) async {
@@ -192,6 +211,7 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
         eventId: _eventId,
         eventName: _eventName,
         eventStart: _eventStart,
+        propTypes: _propTypes,
         percentBoost: double.parse(_percentCtrl.text.trim()),
         betType: _betType,
         minOdds: _parseOdds(_minOddsCtrl.text)!,
@@ -281,6 +301,21 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
                     : 'Only bets on this game will use the boost.',
               ),
               const SizedBox(height: 16),
+              _TapField(
+                label: 'Bet type',
+                text: _propTypes.isEmpty
+                    ? 'Any bet type'
+                    : _propTypes.map((p) => p.label).join(', '),
+                icon: Icons.tune,
+                onTap: PropType.optionsFor(_betType).isEmpty
+                    ? null
+                    : _pickPropTypes,
+                helperText: _propTypes.isEmpty
+                    ? 'Choose bet types if the boost only works on some, like '
+                        'one type of player prop.'
+                    : 'Only these bets will use the boost.',
+              ),
+              const SizedBox(height: 16),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -356,6 +391,67 @@ class _BoostFormSheetState extends State<BoostFormSheet> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Multi-select list of the bet types a boost can be limited to.
+/// Pops with the chosen types ([] means any), or null if dismissed.
+class _PropTypeDialog extends StatefulWidget {
+  const _PropTypeDialog({required this.options, required this.selected});
+
+  final List<PropType> options;
+  final List<PropType> selected;
+
+  @override
+  State<_PropTypeDialog> createState() => _PropTypeDialogState();
+}
+
+class _PropTypeDialogState extends State<_PropTypeDialog> {
+  late final Set<PropType> _chosen = {...widget.selected};
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Bet type'),
+      contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final type in widget.options)
+              CheckboxListTile(
+                value: _chosen.contains(type),
+                title: Text(type.label),
+                onChanged: (checked) => setState(() {
+                  if (checked == true) {
+                    _chosen.add(type);
+                  } else {
+                    _chosen.remove(type);
+                  }
+                }),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, <PropType>[]),
+          child: const Text('Any'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, [
+            for (final type in widget.options)
+              if (_chosen.contains(type)) type,
+          ]),
+          child: const Text('Done'),
+        ),
+      ],
     );
   }
 }

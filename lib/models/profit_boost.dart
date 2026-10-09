@@ -92,6 +92,64 @@ enum BetType {
   final bool autoMatched;
 }
 
+/// The kinds of bet a boost can be limited to. [name] is stored in Firestore
+/// (in the boost's "propTypes" list) and must match a key in PROP_TYPE_MARKETS
+/// in functions/main.py. A boost with none selected applies to any bet.
+enum PropType {
+  moneyline('Moneyline'),
+  spread('Spread'),
+  total('Total (over/under)'),
+  bothTeamsToScore('Both teams to score'),
+  receivingYards('Player receiving yards'),
+  points('Player points'),
+  strikeouts('Pitcher strikeouts'),
+  shotsOnGoal('Player shots on goal'),
+  shotsOnTarget('Player shots on target');
+
+  const PropType(this.label);
+  final String label;
+
+  /// The bet types the backend can search in [league]: the game lines, plus
+  /// the player props or soccer markets it fetches for that league. Must match
+  /// EVENT_MARKETS in functions/main.py.
+  static List<PropType> optionsFor(BetType league) {
+    if (!league.autoMatched) return const [];
+    final isSoccer = league.category == SportCategory.soccer;
+    final extras = switch (league) {
+      BetType.nfl || BetType.ncaaf || BetType.cfl => [receivingYards],
+      BetType.nba || BetType.wnba || BetType.ncaab => [points],
+      BetType.mlb => [strikeouts],
+      BetType.nhl => [shotsOnGoal],
+      _ when isSoccer => [bothTeamsToScore, shotsOnTarget],
+      _ => <PropType>[],
+    };
+    // A soccer moneyline has a draw, so it can't be hedged with two bets.
+    return [
+      if (!isSoccer) moneyline,
+      spread,
+      total,
+      ...extras,
+    ];
+  }
+
+  /// Reads the saved list, ignoring names this version doesn't know.
+  static List<PropType> listFrom(Object? value) {
+    if (value is! List) return const [];
+    final byName = PropType.values.asNameMap();
+    return [
+      for (final name in value)
+        if (byName[name] != null) byName[name]!,
+    ];
+  }
+
+  /// "moneyline or total", "player receiving yards"
+  static String describe(List<PropType> types) {
+    final labels = [for (final t in types) t.label.toLowerCase()];
+    if (labels.length <= 1) return labels.join();
+    return '${labels.sublist(0, labels.length - 1).join(', ')} or ${labels.last}';
+  }
+}
+
 enum BoostStatus { upcoming, active, expired }
 
 class ProfitBoost {
@@ -112,6 +170,7 @@ class ProfitBoost {
     this.eventId,
     this.eventName,
     this.eventStart,
+    this.propTypes = const [],
   });
 
   final String id;
@@ -133,7 +192,12 @@ class ProfitBoost {
   final String? eventName;
   final DateTime? eventStart;
 
+  /// The bet types this boost is limited to; empty means any bet.
+  final List<PropType> propTypes;
+
   bool get isSingleGame => eventId != null && eventId!.isNotEmpty;
+
+  bool get hasPropFilter => propTypes.isNotEmpty;
 
   bool get hasNickname => nickname != null && nickname!.trim().isNotEmpty;
 
@@ -165,6 +229,9 @@ class ProfitBoost {
         'eventStart': isSingleGame && eventStart != null
             ? Timestamp.fromDate(eventStart!)
             : null,
+        // Always written (an empty list means "any"), so editing a boost back
+        // to "any" clears an earlier limit.
+        'propTypes': [for (final p in propTypes) p.name],
         'updatedAt': FieldValue.serverTimestamp(),
         if (isNew) 'createdAt': FieldValue.serverTimestamp(),
       };
@@ -196,6 +263,7 @@ class ProfitBoost {
       eventName: data['eventName'] as String?,
       eventStart:
           data['eventStart'] == null ? null : readDate(data['eventStart']),
+      propTypes: PropType.listFrom(data['propTypes']),
     );
   }
 }

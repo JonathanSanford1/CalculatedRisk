@@ -137,6 +137,22 @@ MARKET_LABELS = {
     "player_shots_on_target": "shots on target",
 }
 
+# What a boost can be limited to (PropType.name in Dart) -> the markets it
+# covers, as they appear on a matchup (alternate_totals is merged into
+# "totals"). A boost with no prop types selected applies to every market.
+# Keep in sync with PropType in the app's profit_boost.dart.
+PROP_TYPE_MARKETS = {
+    "moneyline": ("h2h",),
+    "spread": ("spreads",),
+    "total": ("totals",),
+    "bothTeamsToScore": ("btts",),
+    "receivingYards": ("player_reception_yds",),
+    "points": ("player_points",),
+    "strikeouts": ("pitcher_strikeouts",),
+    "shotsOnGoal": ("player_shots_on_goal",),
+    "shotsOnTarget": ("player_shots_on_target",),
+}
+
 OBJECTIVES = ("guaranteed", "max")  # what hedges and the plan are ranked by
 
 _db = None
@@ -174,6 +190,7 @@ class Boost:
     used: bool = False  # the user marked this boost as already used
     event_id: str | None = None  # set when the boost is for one specific game
     event_name: str | None = None
+    prop_types: tuple[str, ...] = ()  # limited to these bet types; empty = any
 
     def is_expired(self, now: datetime) -> bool:
         return now > self.valid_until
@@ -192,6 +209,14 @@ class Boost:
             and (self.event_id is None or self.event_id == event_id)
         )
 
+    def allows_market(self, market: str) -> bool:
+        """The boost can be used on this market: any market when no bet types
+        were chosen, otherwise only the chosen ones. A bet type this code
+        doesn't know allows nothing, so it never matches the wrong bets."""
+        if not self.prop_types:
+            return True
+        return any(market in PROP_TYPE_MARKETS.get(t, ()) for t in self.prop_types)
+
     def summary(self) -> dict[str, Any]:
         """What the app needs to label this boost on a hedge card."""
         return {
@@ -205,6 +230,7 @@ class Boost:
             "validFrom": self.valid_from,
             "validUntil": self.valid_until,
             "eventName": self.event_name,
+            "propTypes": list(self.prop_types),
         }
 
 
@@ -224,6 +250,17 @@ def _to_utc(value: Any) -> datetime | None:
 
 def _clean_text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _parse_prop_types(value: Any) -> tuple[str, ...]:
+    """The boost's propTypes list; missing, empty, or containing "any" means
+    the boost applies to every bet."""
+    if not isinstance(value, list):
+        return ()
+    names = {v for v in value if isinstance(v, str)}
+    if "any" in names:
+        return ()
+    return tuple(sorted(names))
 
 
 def parse_boost(doc_id: str, data: dict[str, Any]) -> Boost | None:
@@ -250,6 +287,7 @@ def parse_boost(doc_id: str, data: dict[str, Any]) -> Boost | None:
             used=bool(data.get("used", False)),
             event_id=_clean_text(data.get("eventId")),
             event_name=_clean_text(data.get("eventName")),
+            prop_types=_parse_prop_types(data.get("propTypes")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -898,12 +936,13 @@ def _build_opportunity(
 
 def boost_fits(boost: Boost, side: Side, matchup: Matchup, now: datetime) -> bool:
     """A boost can be used on this bet: right book and league, the game starts
-    inside the boost's window (and is the boost's game, if it has one), and
-    the bet's odds are inside the boost's odds range."""
+    inside the boost's window (and is the boost's game, if it has one), the
+    bet is a type the boost allows, and its odds are inside the boost's range."""
     return (
         boost.bookmaker == side.book
         and boost.bet_type == matchup.league
         and boost.covers_game(matchup.event_id, matchup.commence_time, now)
+        and boost.allows_market(matchup.market)
         and boost.min_odds <= side.odds <= boost.max_odds
     )
 
@@ -1156,6 +1195,21 @@ def _only_three_way(game: dict[str, Any]) -> bool:
     return True
 
 
+def _matchup_market(api_market: str) -> str:
+    """The market name a fetched per-game market ends up under on a matchup."""
+    return "totals" if api_market == "alternate_totals" else api_market
+
+
+def _wanted_event_markets(
+    event_markets: list[str], boosts: list[Boost]
+) -> list[str]:
+    """The per-game markets that at least one of these boosts can use."""
+    return [
+        m for m in event_markets
+        if any(b.allows_market(_matchup_market(m)) for b in boosts)
+    ]
+
+
 def _with_props(game: dict[str, Any], props: dict[str, dict[str, list]]) -> dict[str, Any]:
     books = {book: dict(markets) for book, markets in game.get("books", {}).items()}
     for book, markets in props.items():
@@ -1256,14 +1310,24 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
                 in_window += 1
                 event_markets = EVENT_MARKETS.get(league)
                 if event_markets and props_allowed and event_id:
-                    may_fetch = league in fetchable and any(not b.used for b in fits)
-                    try:
-                        props = load_event_markets(sport_key, event_id, event_markets, memo, may_fetch)
-                    except OddsApiError as error:
-                        errors.append(str(error))
-                        props = {}
-                    if props:
-                        game = _with_props(game, props)
+                    # Credits are spent only on markets an unused boost can use.
+                    # Markets only a used boost wants come from the cache alone,
+                    # so that boost's hedge cards stay visible.
+                    fetch_now = _wanted_event_markets(
+                        event_markets, [b for b in fits if not b.used])
+                    cache_only = [m for m in _wanted_event_markets(event_markets, fits)
+                                  if m not in fetch_now]
+                    for markets, may_fetch in ((fetch_now, league in fetchable),
+                                               (cache_only, False)):
+                        if not markets:
+                            continue
+                        try:
+                            props = load_event_markets(sport_key, event_id, markets, memo, may_fetch)
+                        except OddsApiError as error:
+                            errors.append(str(error))
+                            props = {}
+                        if props:
+                            game = _with_props(game, props)
                 if _only_three_way(game):
                     three_way_only += 1
                 matchups = build_matchups(game, league, allow_same_book)
@@ -1289,9 +1353,11 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
                     f"{name}: {_plural(in_window, 'game')} checked; no bets at the two "
                     "sportsbooks cover each other.")
             else:
+                limits = ("odds ranges, bet types," if any(b.prop_types for b in league_boosts)
+                          else "odds ranges")
                 league_notes.append(
                     f"{name}: {_plural(pairs, 'bet pair')} checked; none guarantee a profit "
-                    "with your boosts' odds ranges and current odds.")
+                    f"with your boosts' {limits} and current odds.")
 
     boosts_by_id = {b.id: b for b in boosts}
     groups_by_mode = {

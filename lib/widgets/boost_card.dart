@@ -118,6 +118,13 @@ class BoostCard extends StatelessWidget {
                     '${boost.eventStart == null ? '' : ', ${formatDateTime(boost.eventStart!)}'}',
               ),
             ],
+            if (boost.hasPropFilter) ...[
+              const SizedBox(height: 6),
+              _Detail(
+                icon: Icons.tune,
+                text: 'Only ${PropType.describe(boost.propTypes)} bets',
+              ),
+            ],
             if (!boost.betType.autoMatched) ...[
               const SizedBox(height: 6),
               const _Detail(

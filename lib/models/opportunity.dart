@@ -237,6 +237,7 @@ class GroupBoost {
     required this.used,
     required this.validFrom,
     required this.eventName,
+    this.propTypes = const [],
   });
 
   final String id;
@@ -248,6 +249,7 @@ class GroupBoost {
   final bool used;
   final DateTime? validFrom;
   final String? eventName; // set for single-game boosts
+  final List<PropType> propTypes; // empty means any bet
 
   bool get hasNickname => nickname != null && nickname!.trim().isNotEmpty;
 
@@ -260,7 +262,8 @@ class GroupBoost {
   String get details =>
       '${sportsbook.label} +${formatPercent(percentBoost)} ${betType.label}, '
       'max ${formatMoney(maxBet)}'
-      '${eventName == null ? '' : ', $eventName only'}';
+      '${eventName == null ? '' : ', $eventName only'}'
+      '${propTypes.isEmpty ? '' : ', ${PropType.describe(propTypes)} only'}';
 
   factory GroupBoost.fromMap(Map<String, dynamic> data) => GroupBoost(
         id: data['id'] as String? ?? '',
@@ -274,6 +277,7 @@ class GroupBoost {
         validFrom:
             data['validFrom'] == null ? null : readDate(data['validFrom']),
         eventName: data['eventName'] as String?,
+        propTypes: PropType.listFrom(data['propTypes']),
       );
 }
 
