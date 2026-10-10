@@ -14,8 +14,9 @@ import '../widgets/opportunity_card.dart';
 import '../widgets/plan_card.dart';
 
 /// Hedges found by the Cloud Function: the best plan first, then one card per
-/// boost combination, with a search bar. A goal switch ranks everything by
-/// guaranteed profit or by possible profit. Cards for boosts whose window
+/// boost combination, with a search bar. The options sheet, next to the search
+/// bar, sets whether everything is ranked by guaranteed profit or by possible
+/// profit. Cards for boosts whose window
 /// hasn't opened come next, and cards using a used boost are collected at the
 /// bottom.
 class HedgesPage extends StatefulWidget {
@@ -28,6 +29,9 @@ class HedgesPage extends StatefulWidget {
 }
 
 class _HedgesPageState extends State<HedgesPage> {
+  /// The search field's height: 0.8 of the 48 px it would otherwise be.
+  static const double _searchHeight = kMinInteractiveDimension * 0.8;
+
   final _searchCtrl = TextEditingController();
   late Stream<List<HedgeGroup>> _groupStream;
   late Stream<RefreshStatus?> _statusStream;
@@ -38,6 +42,10 @@ class _HedgesPageState extends State<HedgesPage> {
   bool _allowSameBook = false;
   bool _refreshing = false;
   String _query = '';
+
+  /// Bumped whenever a setting shown in the options sheet changes. The sheet is
+  /// a separate route, so rebuilding this page alone doesn't redraw it.
+  final _sheetChanges = ValueNotifier<int>(0);
 
   @override
   void initState() {
@@ -54,6 +62,7 @@ class _HedgesPageState extends State<HedgesPage> {
           _goal = prefs.goal;
           _allowSameBook = prefs.allowSameBook;
         });
+        _notifySheet();
       },
       onError: (_) {}, // keep the current settings if they can't be read
     );
@@ -63,6 +72,7 @@ class _HedgesPageState extends State<HedgesPage> {
   void dispose() {
     _prefsSubscription?.cancel();
     _searchCtrl.dispose();
+    _sheetChanges.dispose();
     super.dispose();
   }
 
@@ -71,8 +81,12 @@ class _HedgesPageState extends State<HedgesPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Redraws the options sheet if it's open.
+  void _notifySheet() => _sheetChanges.value++;
+
   void _selectGoal(HedgeGoal goal) {
     setState(() => _goal = goal); // switch immediately
+    _notifySheet();
     widget.repository.setGoal(goal).catchError((Object e) {
       _showMessage('Couldn\'t save the ranking choice: $e');
     });
@@ -80,6 +94,7 @@ class _HedgesPageState extends State<HedgesPage> {
 
   void _selectMode(RoundingMode mode) {
     setState(() => _mode = mode); // switch immediately
+    _notifySheet();
     widget.repository.setRoundingMode(mode).catchError((Object e) {
       _showMessage('Couldn\'t save the rounding choice: $e');
     });
@@ -91,6 +106,7 @@ class _HedgesPageState extends State<HedgesPage> {
       _allowSameBook = allow;
       _refreshing = true;
     });
+    _notifySheet();
     try {
       await widget.repository.setAllowSameBook(allow);
       _showMessage(allow
@@ -101,7 +117,10 @@ class _HedgesPageState extends State<HedgesPage> {
     } catch (e) {
       _showMessage('Couldn\'t change the setting: $e');
     } finally {
-      if (mounted) setState(() => _refreshing = false);
+      if (mounted) {
+        setState(() => _refreshing = false);
+        _notifySheet();
+      }
     }
   }
 
@@ -110,16 +129,35 @@ class _HedgesPageState extends State<HedgesPage> {
       context: context,
       showDragHandle: true,
       useSafeArea: true,
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (sheetContext, setSheetState) {
+      isScrollControlled: true,
+      builder: (sheetContext) => ValueListenableBuilder<int>(
+        valueListenable: _sheetChanges,
+        builder: (sheetContext, _, _) {
           final theme = Theme.of(sheetContext);
-          return Padding(
+          return SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('Hedge options', style: theme.textTheme.titleLarge),
+                const SizedBox(height: 16),
+                Text('Rank hedges by', style: theme.textTheme.labelLarge),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<HedgeGoal>(
+                    showSelectedIcon: false,
+                    segments: [
+                      for (final g in HedgeGoal.values)
+                        ButtonSegment(value: g, label: Text(g.label)),
+                    ],
+                    selected: {_goal},
+                    onSelectionChanged: (selection) => _selectGoal(selection.first),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(_goal.description, style: theme.textTheme.bodySmall),
                 const SizedBox(height: 16),
                 Text('Bet rounding', style: theme.textTheme.labelLarge),
                 const SizedBox(height: 8),
@@ -132,10 +170,7 @@ class _HedgesPageState extends State<HedgesPage> {
                         ButtonSegment(value: m, label: Text(m.label)),
                     ],
                     selected: {_mode},
-                    onSelectionChanged: (selection) {
-                      _selectMode(selection.first);
-                      setSheetState(() {});
-                    },
+                    onSelectionChanged: (selection) => _selectMode(selection.first),
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -149,13 +184,16 @@ class _HedgesPageState extends State<HedgesPage> {
                     'but betting both sides at one book is easier to notice.',
                   ),
                   value: _allowSameBook,
-                  onChanged: _refreshing
-                      ? null
-                      : (value) {
-                          _setSameBook(value);
-                          setSheetState(() {});
-                        },
+                  // Off while hedges are being recalculated, so a second tap
+                  // can't start another recalculation (each one uses API credits).
+                  onChanged: _refreshing ? null : (value) => _setSameBook(value),
                 ),
+                if (_refreshing) ...[
+                  const SizedBox(height: 4),
+                  const LinearProgressIndicator(),
+                  const SizedBox(height: 6),
+                  Text('Updating hedges…', style: theme.textTheme.bodySmall),
+                ],
               ],
             ),
           );
@@ -168,6 +206,7 @@ class _HedgesPageState extends State<HedgesPage> {
   Future<void> _refresh() async {
     if (_refreshing) return;
     setState(() => _refreshing = true);
+    _notifySheet();
     try {
       _showMessage(await widget.repository.refreshNow());
     } on FirebaseFunctionsException catch (e) {
@@ -175,7 +214,10 @@ class _HedgesPageState extends State<HedgesPage> {
     } catch (e) {
       _showMessage('Refresh failed: $e');
     } finally {
-      if (mounted) setState(() => _refreshing = false);
+      if (mounted) {
+        setState(() => _refreshing = false);
+        _notifySheet();
+      }
     }
   }
 
@@ -235,21 +277,44 @@ class _HedgesPageState extends State<HedgesPage> {
             onRefresh: _refresh,
           ),
         ),
-        // Goal switch, plus options (rounding and same-sportsbook hedges).
+        // Search, plus options (ranking, rounding, and same-sportsbook hedges).
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 4, 0),
           child: Row(
             children: [
               Expanded(
-                child: SegmentedButton<HedgeGoal>(
-                  showSelectedIcon: false,
-                  style: const ButtonStyle(visualDensity: VisualDensity.compact),
-                  segments: [
-                    for (final g in HedgeGoal.values)
-                      ButtonSegment(value: g, label: Text(g.label)),
-                  ],
-                  selected: {_goal},
-                  onSelectionChanged: (selection) => _selectGoal(selection.first),
+                child: TextField(
+                  controller: _searchCtrl,
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: 'Search teams, players, boosts',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : Tooltip(
+                            message: 'Clear search',
+                            child: InkResponse(
+                              radius: 18,
+                              onTap: () {
+                                _searchCtrl.clear();
+                                setState(() => _query = '');
+                              },
+                              child: const Icon(Icons.clear, size: 20),
+                            ),
+                          ),
+                    // Icons are 48 px tall by default, and that sets the
+                    // field's height, so they're shrunk to let it be shorter.
+                    prefixIconConstraints: const BoxConstraints(
+                        minWidth: 40, minHeight: _searchHeight),
+                    suffixIconConstraints: const BoxConstraints(
+                        minWidth: 40, minHeight: _searchHeight),
+                    isDense: true,
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24)),
+                  ),
+                  onChanged: (value) => setState(() => _query = value),
                 ),
               ),
               IconButton(
@@ -260,8 +325,10 @@ class _HedgesPageState extends State<HedgesPage> {
             ],
           ),
         ),
+        // The current ranking and options, since the ranking is no longer
+        // visible on the screen itself.
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          padding: const EdgeInsets.fromLTRB(16, 2, 16, 4),
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text(
@@ -269,30 +336,6 @@ class _HedgesPageState extends State<HedgesPage> {
               'same-sportsbook hedges ${_allowSameBook ? 'on' : 'off'}.',
               style: theme.textTheme.bodySmall,
             ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-          child: TextField(
-            controller: _searchCtrl,
-            textInputAction: TextInputAction.search,
-            decoration: InputDecoration(
-              hintText: 'Search teams, players, leagues, books, boosts',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _query.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear),
-                      tooltip: 'Clear search',
-                      onPressed: () {
-                        _searchCtrl.clear();
-                        setState(() => _query = '');
-                      },
-                    ),
-              isDense: true,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
-            ),
-            onChanged: (value) => setState(() => _query = value),
           ),
         ),
         Expanded(

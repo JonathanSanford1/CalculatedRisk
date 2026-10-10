@@ -130,7 +130,7 @@ class _GamePickerState extends State<_GamePicker> {
                 }
                 return ListView.separated(
                   itemCount: games.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (_, i) {
                     final game = games[i];
                     return ListTile(
