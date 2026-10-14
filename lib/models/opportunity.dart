@@ -422,6 +422,7 @@ class RefreshStatus {
     required this.message,
     required this.quotaRemaining,
     required this.quotaUsed,
+    this.oddsUpdatedAt,
   });
 
   final DateTime? lastRunAt;
@@ -432,6 +433,11 @@ class RefreshStatus {
   /// odds check that reports them).
   final int? quotaRemaining;
   final int? quotaUsed;
+
+  /// When the game odds behind these results were fetched from The Odds API
+  /// (null until the first check that reports it). Usually older than
+  /// [lastRunAt], because odds are reused for a while to save credits.
+  final DateTime? oddsUpdatedAt;
 
   /// The monthly plan size, worked out from used + remaining.
   int? get quotaTotal => quotaRemaining == null
@@ -445,5 +451,8 @@ class RefreshStatus {
         message: data['message'] as String? ?? '',
         quotaRemaining: (data['quotaRemaining'] as num?)?.toInt(),
         quotaUsed: (data['quotaUsed'] as num?)?.toInt(),
+        oddsUpdatedAt: data['oddsUpdatedAt'] == null
+            ? null
+            : readDate(data['oddsUpdatedAt']),
       );
 }

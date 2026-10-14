@@ -8,22 +8,23 @@ from firebase_admin import firestore
 
 from calcrisk.boosts import Boost, parse_boost
 from calcrisk.config import (
-    EVENT_MARKETS,
-    FETCH_PLAYER_PROPS,
     LEAGUE_KEYS,
     LEAGUE_NAMES,
     OBJECTIVES,
     PROP_CREDIT_RESERVE,
+    FETCH_PLAYER_PROPS,
     db,
 )
 from calcrisk.hedges import find_opportunities, group_opportunities
 from calcrisk.matchups import build_matchups
 from calcrisk.odds_api import (
     OddsApiError,
+    flush_usage,
     game_start,
     load_active_sport_keys,
     load_event_markets,
     load_games,
+    odds_fetched_at,
     resolve_sport_keys,
 )
 from calcrisk.odds_math import (
@@ -32,6 +33,7 @@ from calcrisk.odds_math import (
     normalize_rounding_mode,
 )
 from calcrisk.plan import build_best_plan
+from calcrisk.prefetch import UserInputs, plan_game, prefetch_odds, props_allowed
 
 
 def _only_three_way(game: dict[str, Any]) -> bool:
@@ -43,21 +45,6 @@ def _only_three_way(game: dict[str, Any]) -> bool:
         if set(markets) - {"h2h"} or len(markets.get("h2h", [])) not in (0, 3):
             return False
     return True
-
-
-def _matchup_market(api_market: str) -> str:
-    """The market name a fetched per-game market ends up under on a matchup."""
-    return "totals" if api_market == "alternate_totals" else api_market
-
-
-def _wanted_event_markets(
-    event_markets: list[str], boosts: list[Boost]
-) -> list[str]:
-    """The per-game markets that at least one of these boosts can use."""
-    return [
-        m for m in event_markets
-        if any(b.allows_market(_matchup_market(m)) for b in boosts)
-    ]
 
 
 def _with_props(game: dict[str, Any], props: dict[str, dict[str, list]]) -> dict[str, Any]:
@@ -87,20 +74,15 @@ def _plural(count: int, word: str) -> str:
     return f"{count} {word}{'' if count == 1 else 's'}"
 
 
-def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
-    memo = {} if memo is None else memo
-    now = datetime.now(timezone.utc)
+def _load_inputs(uid: str, now: datetime, snaps=None) -> UserInputs:
+    """Read a user's settings and boosts. snaps: their boost documents, if the
+    caller already has them. Changes nothing."""
     user_ref = db().collection("users").document(uid)
-
     settings = user_ref.collection("settings").document("preferences").get().to_dict() or {}
-    selected = normalize_rounding_mode(settings.get("roundingMode"))
-    allow_same_book = bool(settings.get("allowSameBook", False))
-
-    # Read boosts; delete any whose window has ended.
     boosts: list[Boost] = []
     expired_ids: list[str] = []
     unreadable = unsupported = 0
-    for snap in user_ref.collection("boosts").stream():
+    for snap in (snaps if snaps is not None else user_ref.collection("boosts").stream()):
         boost = parse_boost(snap.id, snap.to_dict() or {})
         if boost is None:
             unreadable += 1
@@ -110,18 +92,94 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
             unsupported += 1
         else:
             boosts.append(boost)
+    return UserInputs(
+        uid=uid,
+        selected=normalize_rounding_mode(settings.get("roundingMode")),
+        allow_same_book=bool(settings.get("allowSameBook", False)),
+        boosts=boosts,
+        expired_ids=expired_ids,
+        unreadable=unreadable,
+        unsupported=unsupported,
+    )
+
+
+def refresh_user(
+    uid: str,
+    memo: dict | None = None,
+    trigger: str = "manual",
+    prefetch: bool = True,
+    inputs: UserInputs | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Recalculate one user's hedges.
+
+    trigger     what asked for this run, for the credit usage log
+                (manual, boost, scheduled, ...)
+    prefetch    fetch the odds the user needs, in parallel, first. A scheduled
+                run turns this off because it already fetched for everyone.
+    inputs, now the user's boosts and the clock, when the caller already has them
+    """
+    memo = {} if memo is None else memo
+    try:
+        return _refresh_user(uid, memo, trigger, prefetch, inputs, now)
+    finally:
+        flush_usage(memo, trigger)
+
+
+def refresh_all_users(trigger: str = "scheduled") -> dict[str, dict[str, Any]]:
+    """Recalculate every user who has boosts, fetching each odds feed once for
+    all of them."""
+    now = datetime.now(timezone.utc)
+    snaps_by_user: dict[str, list] = {}
+    for snap in db().collection_group("boosts").stream():
+        snaps_by_user.setdefault(snap.reference.parent.parent.id, []).append(snap)
+
+    memo: dict[str, Any] = {}
+    results: dict[str, dict[str, Any]] = {}
+    inputs_by_user: dict[str, UserInputs] = {}
+    try:
+        for uid in sorted(snaps_by_user):
+            try:
+                inputs_by_user[uid] = _load_inputs(uid, now, snaps_by_user[uid])
+            except Exception as error:  # noqa: BLE001 - one user's failure shouldn't stop the rest
+                record_failure(uid, error)
+        try:
+            prefetch_odds(list(inputs_by_user.values()), memo, now, trigger)
+        except Exception as error:  # noqa: BLE001 - each user's pass will retry and report it
+            print(f"Prefetch failed: {error!r}")
+        for uid, inputs in inputs_by_user.items():
+            try:
+                results[uid] = refresh_user(uid, memo, trigger, prefetch=False,
+                                            inputs=inputs, now=now)
+            except Exception as error:  # noqa: BLE001
+                record_failure(uid, error)
+    finally:
+        flush_usage(memo, trigger)
+    return results
+
+
+def _refresh_user(uid, memo, trigger, prefetch, inputs, now) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    user_ref = db().collection("users").document(uid)
+    inputs = inputs or _load_inputs(uid, now)
+    selected = inputs.selected
+    allow_same_book = inputs.allow_same_book
+    boosts = inputs.boosts
+    expired_ids = inputs.expired_ids
+    unreadable, unsupported = inputs.unreadable, inputs.unsupported
+
+    # Delete boosts whose window has ended.
     for start in range(0, len(expired_ids), 400):
         batch = db().batch()
         for boost_id in expired_ids[start: start + 400]:
             batch.delete(user_ref.collection("boosts").document(boost_id))
         batch.commit()
 
-    # Leagues with an unused boost may spend credits; leagues where every boost
-    # is used only reuse cached odds (their hedge cards stay visible).
-    fetchable = {b.bet_type for b in boosts if not b.used}
-    quota = db().collection("odds_cache").document("_quota").get().to_dict() or {}
-    remaining = quota.get("remaining")
-    props_allowed = FETCH_PLAYER_PROPS and (remaining is None or remaining >= PROP_CREDIT_RESERVE)
+    # Fetch everything needed from The Odds API first, in parallel.
+    if prefetch:
+        prefetch_odds([inputs], memo, now, trigger)
+    fetchable = inputs.fetchable
+    allow_props = props_allowed(memo)
 
     opportunities: dict[str, list[dict[str, Any]]] = {mode: [] for mode in ROUNDING_MODES}
     errors: list[str] = []
@@ -135,6 +193,7 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
             errors.append(str(error))
             leagues = []
 
+    odds_times: list[datetime] = []  # when the odds used were fetched
     for league in leagues:
         name = LEAGUE_NAMES.get(league, league)
         league_boosts = [b for b in boosts if b.bet_type == league]
@@ -150,29 +209,25 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
             except OddsApiError as error:
                 errors.append(str(error))
                 continue
+            fetched_at = odds_fetched_at(sport_key, memo)
+            if fetched_at is not None and league in fetchable:
+                odds_times.append(fetched_at)
             for game in games:
                 commence, event_id = game_start(game), str(game.get("id") or "")
                 if commence is None:
                     continue
-                fits = [b for b in league_boosts if b.covers_game(event_id, commence, now)]
+                fits, fetch_now, cache_only = plan_game(league, league_boosts, game, now)
                 if not fits:
                     continue  # not inside any boost's window (or not its game)
                 in_window += 1
-                event_markets = EVENT_MARKETS.get(league)
-                if event_markets and props_allowed and event_id:
-                    # Credits are spent only on markets an unused boost can use.
-                    # Markets only a used boost wants come from the cache alone,
-                    # so that boost's hedge cards stay visible.
-                    fetch_now = _wanted_event_markets(
-                        event_markets, [b for b in fits if not b.used])
-                    cache_only = [m for m in _wanted_event_markets(event_markets, fits)
-                                  if m not in fetch_now]
+                if allow_props:
                     for markets, may_fetch in ((fetch_now, league in fetchable),
                                                (cache_only, False)):
                         if not markets:
                             continue
                         try:
-                            props = load_event_markets(sport_key, event_id, markets, memo, may_fetch)
+                            props = load_event_markets(sport_key, event_id, markets, memo,
+                                                       may_fetch, commence, now)
                         except OddsApiError as error:
                             errors.append(str(error))
                             props = {}
@@ -264,7 +319,7 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
         message += f" {_plural(unsupported, 'boost')} not checked (league not supported)."
     if unreadable:
         message += f" {_plural(unreadable, 'boost')} couldn't be read; delete and re-add them."
-    if not props_allowed and FETCH_PLAYER_PROPS:
+    if not allow_props and FETCH_PLAYER_PROPS:
         message += (f" Player props and soccer game markets paused: under "
                     f"{PROP_CREDIT_RESERVE} API credits left.")
     if errors:
@@ -280,6 +335,9 @@ def refresh_user(uid: str, memo: dict | None = None) -> dict[str, Any]:
         "quotaRemaining": quota.get("remaining"),
         "quotaUsed": quota.get("used"),
         "quotaUpdatedAt": quota.get("updatedAt"),
+        # When the game odds behind these results were fetched (the oldest of
+        # the leagues checked), for the app's "Odds updated X min ago".
+        "oddsUpdatedAt": min(odds_times) if odds_times else None,
     })
     print(f"Refreshed {uid}: {message}")
     return {"ok": not errors, "message": message,

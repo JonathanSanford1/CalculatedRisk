@@ -484,6 +484,7 @@ class _StatusBar extends StatelessWidget {
     final s = status;
     final ok = s?.ok ?? true;
     final lastRun = s?.lastRunAt;
+    final oddsUpdated = s?.oddsUpdatedAt;
 
     return Container(
       width: double.infinity,
@@ -510,6 +511,11 @@ class _StatusBar extends StatelessWidget {
                           : 'Checked ${formatAgo(lastRun)}',
                       style: theme.textTheme.labelLarge,
                     ),
+                    if (oddsUpdated != null)
+                      Text(
+                        'Odds updated ${formatAgo(oddsUpdated)}',
+                        style: theme.textTheme.bodySmall,
+                      ),
                     if (s != null && s.message.isNotEmpty)
                       Text(
                         s.message,

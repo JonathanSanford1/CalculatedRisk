@@ -11,7 +11,30 @@ API_BASE = "https://api.the-odds-api.com/v4"
 BOOKMAKERS = ("draftkings", "fanduel")
 GAME_MARKETS = ("h2h", "spreads", "totals")  # moneyline, spread, over/under
 
-ODDS_CACHE_MINUTES = 20      # odds younger than this are reused (saves credits)
+# --- How long fetched odds are reused before spending credits again --------
+# Moneyline/spread/total odds for a whole league (one call per league):
+GAME_LINE_CACHE_MINUTES = 25
+
+# Per-game markets (props, soccer game markets) cost 1 credit per market per
+# game, so they are refreshed less often the further away the game is:
+# (game starts within this many hours, reuse odds younger than this many minutes)
+EVENT_CACHE_TIERS = ((3, 25), (24, 110), (48, 350))
+EVENT_CACHE_FAR_MINUTES = 1430  # games more than 48 hours away: about once a day
+# The ages sit just under a multiple of the 30-minute schedule, so a run that
+# lands a few seconds early or late still refetches on the intended cycle.
+
+# --- Fetching ---------------------------------------------------------------
+FETCH_WORKERS = 6            # odds calls made at the same time
+LOCK_STALE_SECONDS = 90      # a fetch claim older than this is treated as abandoned
+LOCK_WAIT_SECONDS = 25       # longest wait for another refresh's fetch of the same odds
+LOCK_POLL_SECONDS = 1.0
+
+# --- Schedule ------------------------------------------------------------------
+# scheduled_refresh runs every 30 minutes, around the clock. To go hourly
+# overnight instead, set QUIET_HOURS_HOURLY = True: during QUIET_HOURS (Denver
+# time, [start, end)) the run at :30 does nothing.
+QUIET_HOURS_HOURLY = True
+QUIET_HOURS = (0, 7)
 EVENTS_CACHE_MINUTES = 30    # game lists for the game picker (free calls)
 SPORTS_LIST_CACHE_HOURS = 6  # the API's list of in-season leagues (free call)
 MAX_BETS_PER_LIST = 20       # per boost combination, per ranking goal
